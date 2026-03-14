@@ -135,6 +135,7 @@ struct MainCatalogView: View {
     @State private var showingEditGearSheet = false
     @State private var showingMediaImporter = false
     @State private var showingEditMediaSheet = false
+    @State private var showingReplaySheet = false
 
     private var theme: CatalogTheme { preset.theme }
 
@@ -341,6 +342,14 @@ struct MainCatalogView: View {
                     .frame(width: 420, height: 220)
             }
         }
+        .sheet(isPresented: $showingReplaySheet) {
+            if let session = state.selectedSession, let log = state.eventLog {
+                ReplaySessionSheet(state: state, session: session, eventLog: log, theme: theme)
+            } else {
+                Text("No event log available for replay")
+                    .frame(width: 540, height: 280)
+            }
+        }
         .sheet(item: Binding(
             get: { state.pendingSnapshotDraft },
             set: { state.pendingSnapshotDraft = $0 }
@@ -472,6 +481,15 @@ struct MainCatalogView: View {
                     .buttonStyle(RetroButtonStyle(theme: theme))
                     .disabled(state.selectedSession == nil)
                 }
+
+                Button("Replay") {
+                    showingReplaySheet = true
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .disabled(state.selectedSession == nil || state.eventLog == nil)
+                .help(state.eventLog == nil
+                    ? "No event log — start recording during your next session to enable replay"
+                    : "Open session replay")
 
                 presetsSection
                     .frame(height: 240)
@@ -1080,6 +1098,416 @@ private struct MediaMetadataSheet: View {
         }
         .padding(16)
         .frame(minWidth: 420, minHeight: 260)
+    }
+}
+
+private struct ReplayTimelineEvent: Identifiable {
+    let id: String
+    let relativeMs: Double
+    let entry: EventLogEntry
+    let payload: [String: Any]
+}
+
+private struct ReplayChannelState: Identifiable, Hashable {
+    let id: Int
+    let inputA: Bool
+    let inputB: Bool
+    let mix: Int
+}
+
+private struct ReplayMomentState {
+    var snapshot: [String: Any]
+    var channels: [ReplayChannelState]
+    var lastEvent: ReplayTimelineEvent?
+    var nextEvent: ReplayTimelineEvent?
+}
+
+private enum ReplayEngine {
+    static func timeline(from log: EventLogRecord) -> [ReplayTimelineEvent] {
+        let startEpoch = parseISO(log.startedAt) ?? 0
+        let events = log.events.map { entry -> ReplayTimelineEvent in
+            let relativeMs = resolvedRelativeMs(for: entry, startEpoch: startEpoch)
+            return ReplayTimelineEvent(
+                id: "\(entry.id)|\(relativeMs)",
+                relativeMs: relativeMs,
+                entry: entry,
+                payload: entry.payload.mapValues { $0.anyValue }
+            )
+        }
+        return events.sorted {
+            if $0.relativeMs == $1.relativeMs {
+                return $0.entry.timestamp < $1.entry.timestamp
+            }
+            return $0.relativeMs < $1.relativeMs
+        }
+    }
+
+    static func reconstruct(at positionMs: Double, timeline: [ReplayTimelineEvent]) -> ReplayMomentState {
+        var snapshot: [String: Any] = [:]
+        var lastEvent: ReplayTimelineEvent?
+        var nextEvent: ReplayTimelineEvent?
+
+        for event in timeline {
+            if event.relativeMs <= positionMs {
+                apply(event: event, to: &snapshot)
+                lastEvent = event
+            } else {
+                nextEvent = event
+                break
+            }
+        }
+
+        return ReplayMomentState(
+            snapshot: snapshot,
+            channels: extractChannels(from: snapshot),
+            lastEvent: lastEvent,
+            nextEvent: nextEvent
+        )
+    }
+
+    private static func resolvedRelativeMs(for entry: EventLogEntry, startEpoch: Double) -> Double {
+        if let value = entry.relativeMS {
+            return max(0, value)
+        }
+        guard startEpoch > 0, let eventEpoch = parseISO(entry.timestamp) else {
+            return 0
+        }
+        return max(0, (eventEpoch - startEpoch) * 1000.0)
+    }
+
+    private static func parseISO(_ value: String) -> Double? {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: value) {
+            return date.timeIntervalSince1970
+        }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {
+            return date.timeIntervalSince1970
+        }
+        return nil
+    }
+
+    private static func apply(event: ReplayTimelineEvent, to snapshot: inout [String: Any]) {
+        let payload = event.payload
+
+        if let state = payload["state"] as? [String: Any] {
+            snapshot[event.entry.source] = state
+        }
+
+        if let mergedSnapshot = payload["snapshot"] as? [String: Any] {
+            for (client, value) in mergedSnapshot {
+                if let clientState = value as? [String: Any] {
+                    snapshot[client] = clientState
+                }
+            }
+        }
+    }
+
+    private static func extractChannels(from snapshot: [String: Any]) -> [ReplayChannelState] {
+        let dirtyMixerState = (
+            snapshot["dirtymixer_v1"] as? [String: Any]
+                ?? snapshot.first(where: { $0.key.lowercased().contains("dirtymixer") })?.value as? [String: Any]
+        )
+        guard let dirtyMixerState,
+              let rawChannels = dirtyMixerState["channels"] as? [Any]
+        else {
+            return []
+        }
+
+        var channelMap: [Int: ReplayChannelState] = [:]
+        for raw in rawChannels {
+            guard let channel = raw as? [String: Any] else { continue }
+            let id = intValue(channel["id"]) ?? 0
+            guard id > 0 else { continue }
+
+            channelMap[id] = ReplayChannelState(
+                id: id,
+                inputA: boolValue(channel["input_a"]) ?? boolValue(channel["inputA"]) ?? false,
+                inputB: boolValue(channel["input_b"]) ?? boolValue(channel["inputB"]) ?? false,
+                mix: intValue(channel["mix"]) ?? 0
+            )
+        }
+
+        if channelMap.isEmpty {
+            return []
+        }
+
+        return (1 ... 9).map { id in
+            channelMap[id] ?? ReplayChannelState(id: id, inputA: false, inputB: false, mix: 0)
+        }
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let intValue = value as? Int {
+            return intValue
+        }
+        if let doubleValue = value as? Double {
+            return Int(doubleValue.rounded())
+        }
+        if let boolValue = value as? Bool {
+            return boolValue ? 1 : 0
+        }
+        if let stringValue = value as? String {
+            return Int(stringValue)
+        }
+        return nil
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let boolValue = value as? Bool {
+            return boolValue
+        }
+        if let intValue = value as? Int {
+            return intValue != 0
+        }
+        if let doubleValue = value as? Double {
+            return doubleValue != 0
+        }
+        if let stringValue = value as? String {
+            return ["1", "true", "yes", "on"].contains(stringValue.lowercased())
+        }
+        return nil
+    }
+}
+
+private struct ReplaySessionSheet: View {
+    @ObservedObject var state: CatalogState
+    let session: SessionRecord
+    let eventLog: EventLogRecord
+    let theme: CatalogTheme
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var timeline: [ReplayTimelineEvent] = []
+    @State private var positionMs: Double = 0
+    @State private var isPlaying = false
+    @State private var playbackSpeed: Double = 1.0
+    @State private var showingExportSheet = false
+    @State private var exportName = ""
+
+    private let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+    private let speedOptions: [Double] = [0.5, 1.0, 2.0, 4.0]
+
+    private var durationMs: Double {
+        max(timeline.last?.relativeMs ?? 0, 1)
+    }
+
+    private var moment: ReplayMomentState {
+        ReplayEngine.reconstruct(at: positionMs, timeline: timeline)
+    }
+
+    private var progressPercent: Double {
+        guard durationMs > 0 else { return 0 }
+        return min(1, max(0, positionMs / durationMs))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Session Replay")
+                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.strongText)
+                Spacer()
+                Button("Close") {
+                    dismiss()
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 90)
+            }
+
+            Text("\(session.title) — \(session.date)")
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(theme.accent)
+
+            VStack(spacing: 6) {
+                Slider(value: $positionMs, in: 0 ... durationMs, step: 10)
+                    .tint(theme.accent)
+                    .disabled(timeline.isEmpty)
+                HStack {
+                    Text(state.clockString(from: 0))
+                    Spacer()
+                    Text(state.clockString(from: positionMs))
+                    Spacer()
+                    Text(state.clockString(from: durationMs))
+                }
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(theme.muted)
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(theme.panelInner)
+                            .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+                        Rectangle()
+                            .fill(theme.accent)
+                            .frame(width: geo.size.width * progressPercent)
+                    }
+                }
+                .frame(height: 10)
+            }
+
+            HStack(spacing: 8) {
+                Button("◀◀") {
+                    isPlaying = false
+                    positionMs = 0
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 60)
+
+                Button(isPlaying ? "⏸" : "▶") {
+                    if timeline.isEmpty { return }
+                    isPlaying.toggle()
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 60)
+
+                Button("▶▶") {
+                    positionMs = min(durationMs, positionMs + 10_000)
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 60)
+
+                Spacer()
+
+                Text("Speed:")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(theme.text)
+
+                ForEach(speedOptions, id: \.self) { speed in
+                    Button(speed == floor(speed) ? "\(Int(speed))x" : "\(speed)x") {
+                        playbackSpeed = speed
+                    }
+                    .buttonStyle(RetroButtonStyle(theme: theme))
+                    .frame(width: 52)
+                    .overlay(
+                        Rectangle().stroke(playbackSpeed == speed ? theme.accent : .clear, lineWidth: 1)
+                    )
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Current state at this moment:")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.strongText)
+
+                if moment.channels.isEmpty {
+                    Text("No DirtyMixer state available at this position")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(theme.muted)
+                } else {
+                    ForEach(Array(stride(from: 0, to: moment.channels.count, by: 3)), id: \.self) { startIndex in
+                        let endIndex = min(startIndex + 3, moment.channels.count)
+                        let line = moment.channels[startIndex ..< endIndex]
+                            .map { "CH\($0.id): \($0.mix)" }
+                            .joined(separator: "   ")
+                        Text(line)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+            }
+            .padding(8)
+            .background(theme.panelInner)
+            .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+
+            Text("Last event: \(moment.lastEvent?.entry.summary ?? "None yet")")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(theme.strongText)
+
+            Text(nextEventDescription())
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(theme.muted)
+
+            HStack(spacing: 8) {
+                Button("Replay to Hardware") {
+                    state.replaySnapshotToHardware(moment.snapshot, at: positionMs)
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .disabled(!state.nexusClient.isConnected || moment.snapshot.isEmpty)
+                .help(state.nexusClient.isConnected
+                    ? "Send reconstructed state at this moment to Nexus"
+                    : "Connect to Nexus to replay to hardware")
+
+                Button("Export This Moment") {
+                    exportName = "Replay Export \(state.clockString(from: positionMs))"
+                    showingExportSheet = true
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .disabled(moment.snapshot.isEmpty)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 760, minHeight: 520)
+        .background(theme.background)
+        .onAppear {
+            timeline = ReplayEngine.timeline(from: eventLog)
+            if positionMs > durationMs {
+                positionMs = durationMs
+            }
+        }
+        .onReceive(timer) { _ in
+            guard isPlaying else { return }
+            if positionMs >= durationMs {
+                isPlaying = false
+                return
+            }
+            positionMs = min(durationMs, positionMs + (50.0 * playbackSpeed))
+            if positionMs >= durationMs {
+                isPlaying = false
+            }
+        }
+        .sheet(isPresented: $showingExportSheet) {
+            ReplayExportSheet(
+                defaultName: exportName,
+                onSave: { name in
+                    state.exportReplayMoment(snapshot: moment.snapshot, name: name, positionMs: positionMs)
+                }
+            )
+        }
+    }
+
+    private func nextEventDescription() -> String {
+        guard let next = moment.nextEvent else {
+            return "Next event: End of session"
+        }
+        let delta = max(0, next.relativeMs - positionMs)
+        return "Next event: \(next.entry.summary) (in \(state.clockString(from: delta)))"
+    }
+}
+
+private struct ReplayExportSheet: View {
+    let defaultName: String
+    let onSave: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    init(defaultName: String, onSave: @escaping (String) -> Void) {
+        self.defaultName = defaultName
+        self.onSave = onSave
+        _name = State(initialValue: defaultName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Export Replay Moment")
+                .font(.headline)
+            TextField("Preset name", text: $name)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button("Save") {
+                    onSave(name)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
     }
 }
 

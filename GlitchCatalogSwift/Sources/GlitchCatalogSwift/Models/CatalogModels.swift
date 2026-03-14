@@ -59,13 +59,23 @@ struct PresetRecord: Codable, Identifiable, Hashable {
 
 struct EventLogEntry: Codable, Hashable, Identifiable {
     var timestamp: String
+    var relativeMS: Double?
     var type: String
     var source: String
     var summary: String
     var payload: [String: AnyCodable]
 
     var id: String {
-        "\(timestamp)|\(type)|\(source)|\(summary)"
+        "\(timestamp)|\(relativeMS ?? -1)|\(type)|\(source)|\(summary)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case timestamp
+        case relativeMS = "relative_ms"
+        case type
+        case source
+        case summary
+        case payload
     }
 }
 

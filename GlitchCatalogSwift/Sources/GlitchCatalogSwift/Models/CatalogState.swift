@@ -532,6 +532,54 @@ final class CatalogState: ObservableObject {
         ])
     }
 
+    func replaySnapshotToHardware(_ snapshot: [String: Any], at positionMs: Double) {
+        guard nexusClient.isConnected else {
+            showToast("Connect to Nexus to replay to hardware")
+            return
+        }
+        guard !snapshot.isEmpty else {
+            showToast("No state available at this moment")
+            return
+        }
+
+        nexusClient.sendMessage(type: "scene_recall", payload: [
+            "snapshot": snapshot,
+        ])
+        showToast("State restored to \(clockString(from: positionMs))")
+    }
+
+    func exportReplayMoment(snapshot: [String: Any], name: String, positionMs: Double) {
+        guard !snapshot.isEmpty else {
+            showToast("No state available at this moment")
+            return
+        }
+        guard let selectedSessionID, var document = documentsBySessionID[selectedSessionID] else {
+            return
+        }
+
+        let now = Date()
+        let iso = ISO8601DateFormatter().string(from: now)
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = "Replay Export \(clockString(from: positionMs))"
+
+        let shortID = UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .prefix(8)
+        let preset = PresetRecord(
+            id: "preset_\(shortID)",
+            name: trimmedName.isEmpty ? fallbackName : trimmedName,
+            createdAt: iso,
+            snapshot: AnyCodable.wrapDictionary(snapshot)
+        )
+
+        document.presets.insert(preset, at: 0)
+        documentsBySessionID[selectedSessionID] = document
+        store.saveSessionDocument(document)
+        refreshSessionIndex(selecting: selectedSessionID)
+        selectedPresetID = preset.id
+        showToast("Replay moment exported")
+    }
+
     func eventTimelineRows() -> [String] {
         guard let eventLog else { return [] }
         return eventLog.events.map { entry in
@@ -559,6 +607,18 @@ final class CatalogState: ObservableObject {
         out.locale = Locale(identifier: "en_US_POSIX")
         out.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return out.string(from: date)
+    }
+
+    func clockString(from positionMs: Double) -> String {
+        let totalSeconds = max(0, Int(positionMs / 1000.0))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+
+        if hours > 0 {
+            return String(format: "%01d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 
     static func format(date: Date) -> String {

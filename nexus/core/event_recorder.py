@@ -14,6 +14,7 @@ ALLOWED_REPLAY_SPEEDS = {0.5, 1.0, 2.0, 4.0}
 @dataclass(slots=True)
 class EventEntry:
     timestamp: str
+    relative_ms: int
     type: str
     source: str
     summary: str
@@ -22,6 +23,7 @@ class EventEntry:
     def as_dict(self) -> dict[str, Any]:
         return {
             "timestamp": self.timestamp,
+            "relative_ms": self.relative_ms,
             "type": self.type,
             "source": self.source,
             "summary": self.summary,
@@ -38,6 +40,7 @@ class RecordingSession:
     events: list[EventEntry] = field(default_factory=list)
     file_path: Path | None = None
     active: bool = True
+    started_at_epoch: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +72,7 @@ class EventRecorder:
             started_at=started,
             file_path=file_path,
             active=True,
+            started_at_epoch=_parse_iso_timestamp(started) or 0.0,
         )
         self.active_sessions[session_id] = session
         self.known_sessions[session_id] = session
@@ -92,15 +96,18 @@ class EventRecorder:
         if not self.active_sessions:
             return
 
-        entry = EventEntry(
-            timestamp=_iso_now_ms(),
-            type=event_type,
-            source=source,
-            summary=summary,
-            payload=_json_safe_dict(payload or {}),
-        )
-
+        timestamp = _iso_now_ms()
+        timestamp_epoch = _parse_iso_timestamp(timestamp) or 0.0
         for session in list(self.active_sessions.values()):
+            relative_ms = int(max(0.0, (timestamp_epoch - session.started_at_epoch) * 1000.0))
+            entry = EventEntry(
+                timestamp=timestamp,
+                relative_ms=relative_ms,
+                type=event_type,
+                source=source,
+                summary=summary,
+                payload=_json_safe_dict(payload or {}),
+            )
             session.events.append(entry)
             self._persist(session)
 
@@ -134,6 +141,7 @@ class EventRecorder:
         events = [
             EventEntry(
                 timestamp=str(item.get("timestamp", "")),
+                relative_ms=int(item.get("relative_ms", 0) or 0),
                 type=str(item.get("type", "")),
                 source=str(item.get("source", "")),
                 summary=str(item.get("summary", "")),
@@ -151,6 +159,7 @@ class EventRecorder:
             events=events,
             file_path=latest,
             active=False,
+            started_at_epoch=_parse_iso_timestamp(str(parsed.get("started_at", ""))) or 0.0,
         )
 
 
