@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 
-from websockets.client import connect
+from websockets.asyncio.client import connect
 
 NEXUS_URL = "ws://127.0.0.1:8675"
 CLIENT_ID = "nexus_test_client"
