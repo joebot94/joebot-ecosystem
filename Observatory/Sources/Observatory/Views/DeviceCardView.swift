@@ -3,7 +3,6 @@ import SwiftUI
 
 struct DeviceCardView: View {
     let info: NexusClientInfo
-    var useLiquidGlass: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -45,17 +44,11 @@ struct DeviceCardView: View {
         .frame(minHeight: 180)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(
-                    useLiquidGlass
-                        ? AnyShapeStyle(.regularMaterial)
-                        : AnyShapeStyle(
-                            info.online ? Color(red: 0.16, green: 0.16, blue: 0.20) : Color(red: 0.20, green: 0.20, blue: 0.20)
-                        )
-                )
+                .fill(info.online ? Color(red: 0.16, green: 0.16, blue: 0.20) : Color(red: 0.20, green: 0.20, blue: 0.20))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(info.online ? Color.orange.opacity(useLiquidGlass ? 0.85 : 0.7) : Color.gray.opacity(useLiquidGlass ? 0.8 : 0.65), lineWidth: 1)
+                .stroke(info.online ? Color.orange.opacity(0.7) : Color.gray.opacity(0.65), lineWidth: 1)
         )
     }
 }
