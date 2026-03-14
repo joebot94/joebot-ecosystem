@@ -4,10 +4,21 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 
-if [[ ! -d "$DIST_DIR/DirtyMixerApp.app" || ! -d "$DIST_DIR/GlitchCatalogSwift.app" || ! -d "$DIST_DIR/Observatory.app" ]]; then
-  echo "App bundles missing. Building with make package..."
-  (cd "$ROOT_DIR" && make package)
-fi
+echo "Stopping running app instances (if any)..."
+osascript <<APPLESCRIPT
+try
+  tell application "DirtyMixerApp" to quit
+end try
+try
+  tell application "GlitchCatalogSwift" to quit
+end try
+try
+  tell application "Observatory" to quit
+end try
+APPLESCRIPT
+
+echo "Building latest app bundles..."
+(cd "$ROOT_DIR" && make package)
 
 if ! lsof -iTCP:8675 -sTCP:LISTEN >/dev/null 2>&1; then
   osascript <<APPLESCRIPT

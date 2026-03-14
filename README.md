@@ -60,7 +60,7 @@ Useful commands:
 From repo root:
 
 ```bash
-make tabs      # open all 4 services in Terminal tabs
+make tabs      # rebuild app bundles, then launch Nexus + apps
 make run       # same as make tabs (recommended for interactive app windows)
 make demo      # run automated protocol verification
 make package   # build .app bundles into ./dist
