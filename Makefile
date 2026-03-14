@@ -1,4 +1,4 @@
-.PHONY: up down status logs tabs demo package
+.PHONY: up down status logs tabs run demo package
 
 up:
 	./scripts/joebot-stack.sh up
@@ -14,6 +14,8 @@ logs:
 
 tabs:
 	./scripts/open-stack-tabs.sh
+
+run: tabs
 
 demo:
 	python3 ./scripts/demo_check.py

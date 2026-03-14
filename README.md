@@ -61,6 +61,7 @@ From repo root:
 
 ```bash
 make tabs      # open all 4 services in Terminal tabs
+make run       # same as make tabs (recommended for interactive app windows)
 make demo      # run automated protocol verification
 make package   # build .app bundles into ./dist
 ```
