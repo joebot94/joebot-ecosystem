@@ -41,6 +41,12 @@ From repo root:
 ./scripts/joebot-stack.sh up
 ```
 
+For normal desktop use (opens 4 Terminal tabs and launches all apps):
+
+```bash
+./scripts/open-stack-tabs.sh
+```
+
 Useful commands:
 
 ```bash
