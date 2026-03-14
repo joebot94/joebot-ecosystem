@@ -29,6 +29,41 @@ struct SessionGearRecord: Codable, Identifiable, Hashable {
     var sessionID: UUID
     var gearID: UUID
     var notes: String
+    var photos: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sessionID = "sessionID"
+        case gearID = "gearID"
+        case notes
+        case photos
+    }
+
+    init(id: UUID, sessionID: UUID, gearID: UUID, notes: String, photos: [String] = []) {
+        self.id = id
+        self.sessionID = sessionID
+        self.gearID = gearID
+        self.notes = notes
+        self.photos = photos
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        gearID = try container.decode(UUID.self, forKey: .gearID)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        photos = try container.decodeIfPresent([String].self, forKey: .photos) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(gearID, forKey: .gearID)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(photos, forKey: .photos)
+    }
 }
 
 struct MediaRecord: Codable, Identifiable, Hashable {

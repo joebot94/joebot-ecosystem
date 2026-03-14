@@ -2,6 +2,10 @@ import Combine
 import Foundation
 import JoebotSDK
 import AppKit
+import AVFoundation
+import CryptoKit
+import CoreMedia
+import ImageIO
 
 struct PendingSnapshotDraft: Identifiable {
     let id: String
@@ -353,6 +357,44 @@ final class CatalogState: ObservableObject {
         showToast("Gear removed")
     }
 
+    func attachPhotosToSelectedGear(urls: [URL]) {
+        guard let selectedGearLinkID else {
+            showToast("Select a gear item first")
+            return
+        }
+        guard !urls.isEmpty else { return }
+
+        var addedCount = 0
+        updateSelectedDocument { document in
+            guard let linkIndex = document.sessionGear.firstIndex(where: { $0.id == selectedGearLinkID }) else { return }
+            var existing = Set(document.sessionGear[linkIndex].photos)
+            for url in urls {
+                let didAccess = url.startAccessingSecurityScopedResource()
+                defer {
+                    if didAccess {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+                let path = url.path
+                if !existing.contains(path) {
+                    existing.insert(path)
+                    document.sessionGear[linkIndex].photos.append(path)
+                    addedCount += 1
+                }
+            }
+        }
+
+        showToast("Added \(addedCount) gear photo(s)")
+    }
+
+    func openSelectedGearPhoto() {
+        guard let firstPath = selectedGearRow?.link.photos.first else {
+            showToast("No gear photo attached")
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: firstPath))
+    }
+
     func addMediaFiles(urls: [URL]) {
         guard let selectedSessionID else {
             showToast("Select a session first")
@@ -361,6 +403,7 @@ final class CatalogState: ObservableObject {
         guard !urls.isEmpty else { return }
 
         var newestMediaID: UUID?
+        var importedCount = 0
         updateSelectedDocument { document in
             for url in urls {
                 let didAccess = url.startAccessingSecurityScopedResource()
@@ -370,39 +413,44 @@ final class CatalogState: ObservableObject {
                     }
                 }
 
-                let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey, .nameKey, .isDirectoryKey])
+                let values = try? url.resourceValues(
+                    forKeys: [.creationDateKey, .fileSizeKey, .nameKey, .isDirectoryKey]
+                )
                 if values?.isDirectory == true {
                     continue
                 }
 
                 let fileName = values?.name ?? url.lastPathComponent
                 let createdAt = values?.creationDate ?? Date()
-                let fileSize = values?.fileSize
+                let fileSize = values?.fileSize ?? 0
                 let kind = inferMediaKind(from: url.pathExtension)
-                let noteSuffix = fileSize.map { "size=\($0) bytes" } ?? "size=unknown"
+                let metadata = mediaMetadata(for: url, kind: kind)
+                let checksum = sha256(for: url) ?? ""
+                let noteSuffix = "size=\(fileSize) bytes"
 
                 let record = MediaRecord(
                     id: UUID(),
                     sessionID: selectedSessionID,
                     filePath: url.path,
                     kind: kind,
-                    checksum: "",
-                    duration: 0,
-                    width: 0,
-                    height: 0,
-                    codec: "",
+                    checksum: checksum,
+                    duration: metadata.duration,
+                    width: metadata.width,
+                    height: metadata.height,
+                    codec: metadata.codec,
                     createdAt: ISO8601DateFormatter().string(from: createdAt),
                     notes: "\(fileName) | \(noteSuffix)",
                     thumbnailPath: ""
                 )
                 newestMediaID = record.id
                 document.media.append(record)
+                importedCount += 1
             }
         }
 
         if let newestMediaID {
             selectedMediaID = newestMediaID
-            showToast("Added \(urls.count) media file(s)")
+            showToast("Added \(importedCount) media file(s)")
         }
     }
 
@@ -433,6 +481,65 @@ final class CatalogState: ObservableObject {
         guard let selectedMedia else { return }
         let fileURL = URL(fileURLWithPath: selectedMedia.filePath)
         NSWorkspace.shared.open(fileURL)
+    }
+
+    func exportSelectedSessionJSON() {
+        guard let selectedSessionID, let document = documentsBySessionID[selectedSessionID] else {
+            showToast("Select a session first")
+            return
+        }
+
+        let exportURL = exportsDirectoryURL()
+            .appendingPathComponent("session_\(selectedSessionID.uuidString.lowercased())_\(exportTimestampTag()).json")
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(document)
+            try data.write(to: exportURL, options: [.atomic])
+            showToast("Session export saved: \(exportURL.lastPathComponent)")
+        } catch {
+            showToast("Session export failed")
+        }
+    }
+
+    func exportSelectedMediaCSV(mediaItems: [MediaRecord]) {
+        guard let selectedSession else {
+            showToast("Select a session first")
+            return
+        }
+
+        let rows = mediaItems
+        let exportURL = exportsDirectoryURL()
+            .appendingPathComponent("media_\(selectedSession.id.uuidString.lowercased())_\(exportTimestampTag()).csv")
+
+        var csv = "id,session_id,file_path,kind,checksum,duration,width,height,codec,created_at,notes,thumbnail_path\n"
+        for row in rows {
+            csv.append(
+                [
+                    row.id.uuidString,
+                    row.sessionID.uuidString,
+                    csvEscape(row.filePath),
+                    csvEscape(row.kind),
+                    csvEscape(row.checksum),
+                    String(format: "%.3f", row.duration),
+                    String(row.width),
+                    String(row.height),
+                    csvEscape(row.codec),
+                    csvEscape(row.createdAt),
+                    csvEscape(row.notes),
+                    csvEscape(row.thumbnailPath),
+                ].joined(separator: ",")
+            )
+            csv.append("\n")
+        }
+
+        do {
+            try csv.write(to: exportURL, atomically: true, encoding: .utf8)
+            showToast("Media CSV saved: \(exportURL.lastPathComponent)")
+        } catch {
+            showToast("Media CSV export failed")
+        }
     }
 
     func sendSnapshot() {
@@ -810,5 +917,99 @@ final class CatalogState: ObservableObject {
             return "script"
         }
         return "reference"
+    }
+
+    private func mediaMetadata(for url: URL, kind: String) -> (duration: Double, width: Int, height: Int, codec: String) {
+        switch kind {
+        case "video":
+            let asset = AVAsset(url: url)
+            let duration = max(0, CMTimeGetSeconds(asset.duration).isFinite ? CMTimeGetSeconds(asset.duration) : 0)
+            let track = asset.tracks(withMediaType: .video).first
+            var width = 0
+            var height = 0
+            var codec = ""
+
+            if let track {
+                let transformed = track.naturalSize.applying(track.preferredTransform)
+                width = Int(abs(transformed.width).rounded())
+                height = Int(abs(transformed.height).rounded())
+                if let firstDescription = track.formatDescriptions.first {
+                    let desc = firstDescription as! CMFormatDescription
+                    codec = fourCC(from: CMFormatDescriptionGetMediaSubType(desc))
+                }
+            }
+            return (duration, width, height, codec)
+
+        case "image":
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            else {
+                return (0, 0, 0, "")
+            }
+            let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+            let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+            return (0, width, height, url.pathExtension.uppercased())
+
+        default:
+            return (0, 0, 0, "")
+        }
+    }
+
+    private func sha256(for url: URL) -> String? {
+        guard let stream = InputStream(url: url) else { return nil }
+        stream.open()
+        defer { stream.close() }
+
+        var hasher = SHA256()
+        let bufferSize = 64 * 1024
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: bufferSize)
+            if read < 0 {
+                return nil
+            }
+            if read == 0 {
+                break
+            }
+            hasher.update(data: Data(buffer[0 ..< read]))
+        }
+
+        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return "sha256:\(digest)"
+    }
+
+    private func fourCC(from code: FourCharCode) -> String {
+        let bytes: [UInt8] = [
+            UInt8((code >> 24) & 0xFF),
+            UInt8((code >> 16) & 0xFF),
+            UInt8((code >> 8) & 0xFF),
+            UInt8(code & 0xFF),
+        ]
+        let text = String(bytes: bytes, encoding: .ascii) ?? "\(code)"
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func exportsDirectoryURL() -> URL {
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let dir = docsDir
+            .appendingPathComponent("Joebot", isDirectory: true)
+            .appendingPathComponent("GlitchCatalog", isDirectory: true)
+            .appendingPathComponent("exports", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func exportTimestampTag() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        return formatter.string(from: Date())
+    }
+
+    private func csvEscape(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+        return "\"\(escaped)\""
     }
 }

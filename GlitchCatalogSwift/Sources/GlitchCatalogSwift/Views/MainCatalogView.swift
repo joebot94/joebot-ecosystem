@@ -135,6 +135,7 @@ struct MainCatalogView: View {
     @State private var showingEditGearSheet = false
     @State private var showingMediaImporter = false
     @State private var showingEditMediaSheet = false
+    @State private var showingGearPhotoImporter = false
     @State private var showingReplaySheet = false
 
     private var theme: CatalogTheme { preset.theme }
@@ -384,6 +385,18 @@ struct MainCatalogView: View {
                 state.selectMedia(nil)
             }
         }
+        .fileImporter(
+            isPresented: $showingGearPhotoImporter,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case let .success(urls):
+                state.attachPhotosToSelectedGear(urls: urls)
+            case .failure:
+                break
+            }
+        }
         .onChange(of: kindOptions) { _, next in
             if !next.contains(selectedKindFilter) {
                 selectedKindFilter = "All kinds"
@@ -566,18 +579,24 @@ struct MainCatalogView: View {
             }
 
             HStack(spacing: 8) {
-                Button("Export Session to JSON") {}
+                Button("Export Session to JSON") {
+                    state.exportSelectedSessionJSON()
+                }
                     .buttonStyle(RetroButtonStyle(theme: theme))
                     .frame(width: 360)
+                    .disabled(state.selectedSession == nil)
 
                 Text("Tapes: \(state.tapesForSelectedSession.count) | Gear: \(state.gearChainForSelectedSession.count) | Media: \(filteredMedia.count) | Presets: \(state.presets.count) | Events: \(state.eventLog?.events.count ?? 0)")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity)
 
-                Button("Export Media CSV") {}
+                Button("Export Media CSV") {
+                    state.exportSelectedMediaCSV(mediaItems: filteredMedia)
+                }
                     .buttonStyle(RetroButtonStyle(theme: theme))
                     .frame(width: 360)
+                    .disabled(state.selectedSession == nil || filteredMedia.isEmpty)
             }
 
             RetroPanel(title: "Preview", theme: theme) {
@@ -714,6 +733,11 @@ struct MainCatalogView: View {
                                             .foregroundStyle(theme.muted)
                                             .lineLimit(1)
                                     }
+                                    if !row.link.photos.isEmpty {
+                                        Text("photos: \(row.link.photos.count)")
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.accent)
+                                    }
                                 }
                                 .font(.system(size: 12, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -740,6 +764,16 @@ struct MainCatalogView: View {
                     }
                         .buttonStyle(RetroButtonStyle(theme: theme))
                         .disabled(state.selectedGearRow == nil)
+                    Button("Add Photos...") {
+                        showingGearPhotoImporter = true
+                    }
+                        .buttonStyle(RetroButtonStyle(theme: theme))
+                        .disabled(state.selectedGearRow == nil)
+                    Button("Open Photo") {
+                        state.openSelectedGearPhoto()
+                    }
+                        .buttonStyle(RetroButtonStyle(theme: theme))
+                        .disabled(state.selectedGearRow?.link.photos.isEmpty ?? true)
                     Button("Remove From Session") {
                         state.removeSelectedGearFromSession()
                     }
