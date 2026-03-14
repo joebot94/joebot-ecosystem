@@ -16,6 +16,7 @@ from core.heartbeat import HeartbeatWatcher
 from core.log_bus import LogBus
 from core.registry import ClientRecord, ClientRegistry
 from core.state_store import StateStore
+from core.event_recorder import EventRecorder
 
 
 class NexusRuntime:
@@ -27,6 +28,7 @@ class NexusRuntime:
         self.pending_capability_requests: dict[str, PendingRequest] = {}
         self.pending_scene_requests: dict[str, PendingRequest] = {}
         self.heartbeat_timeout_seconds = HEARTBEAT_TIMEOUT_SECONDS
+        self.event_recorder = EventRecorder()
 
     async def send(self, websocket: WebSocketServerProtocol, message: dict[str, Any]) -> None:
         await websocket.send(json.dumps(message))
@@ -37,6 +39,9 @@ class NexusRuntime:
             source=message.get("source"),
             target=self.websocket_to_client_id.get(websocket, "unknown"),
         )
+
+    def record_event(self, event_type: str, source: str, summary: str, payload: dict[str, Any] | None = None) -> None:
+        self.event_recorder.record_event(event_type=event_type, source=source, summary=summary, payload=payload or {})
 
     async def broadcast_to_monitors(self, message_type: str, payload: dict[str, Any]) -> None:
         tasks: list[asyncio.Task[None]] = []
@@ -110,6 +115,12 @@ class NexusServer:
         if not changed:
             return
         self.runtime.log_bus.log("warn", "Client timed out", client_id=record.client_id)
+        self.runtime.record_event(
+            event_type="client.offline",
+            source=record.client_id,
+            summary="Client marked offline after heartbeat timeout",
+            payload={"client_id": record.client_id},
+        )
         await self.runtime.broadcast_status(record.client_id)
         await self.runtime.broadcast_registry_snapshot()
 
@@ -121,11 +132,23 @@ class NexusServer:
         changed = self.runtime.registry.set_offline(client_id)
         if changed:
             self.runtime.log_bus.log("info", "Client disconnected", client_id=client_id)
+            self.runtime.record_event(
+                event_type="client.disconnected",
+                source=client_id,
+                summary="Client disconnected",
+                payload={"client_id": client_id},
+            )
             await self.runtime.broadcast_status(client_id)
             await self.runtime.broadcast_registry_snapshot()
 
     async def _connection_handler(self, websocket: WebSocketServerProtocol) -> None:
         self.runtime.log_bus.log("info", "WebSocket connected", peer=str(websocket.remote_address))
+        self.runtime.record_event(
+            event_type="client.socket_connected",
+            source="nexus",
+            summary="Socket connected",
+            payload={"peer": str(websocket.remote_address)},
+        )
         try:
             async for raw in websocket:
                 try:
@@ -133,6 +156,12 @@ class NexusServer:
                     message = parse_message(payload)
                 except Exception as exc:
                     self.runtime.log_bus.log("error", "Invalid message", error=str(exc))
+                    self.runtime.record_event(
+                        event_type="error",
+                        source="nexus",
+                        summary="Invalid message",
+                        payload={"error": str(exc), "raw": str(raw)[:500]},
+                    )
                     await self.runtime.send(
                         websocket,
                         make_message("error", source="nexus", payload={"error": "invalid_message", "detail": str(exc)}),

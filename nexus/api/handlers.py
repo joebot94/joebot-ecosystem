@@ -17,6 +17,9 @@ from api.models import (
     NexusMessage,
     QueryMessage,
     RegisterMessage,
+    RecordingRequestMessage,
+    RecordingStartMessage,
+    RecordingStopMessage,
     SceneRecallMessage,
     SceneSaveMessage,
     SceneStateMessage,
@@ -66,6 +69,15 @@ class NexusHandlers:
         if msg_type == "scene_recall" and isinstance(message, SceneRecallMessage):
             await self._handle_scene_recall(websocket, message)
             return
+        if msg_type == "recording.start" and isinstance(message, RecordingStartMessage):
+            await self._handle_recording_start(websocket, message)
+            return
+        if msg_type == "recording.stop" and isinstance(message, RecordingStopMessage):
+            await self._handle_recording_stop(websocket, message)
+            return
+        if msg_type == "recording.request" and isinstance(message, RecordingRequestMessage):
+            await self._handle_recording_request(websocket, message)
+            return
         if msg_type == "scene.state" and isinstance(message, SceneStateMessage):
             await self._handle_scene_state(message)
             return
@@ -100,6 +112,12 @@ class NexusHandlers:
         )
 
         self.runtime.log_bus.log("info", "Client registered", client_id=client_id, client_type=client_type)
+        self.runtime.record_event(
+            event_type="client.connected",
+            source=client_id,
+            summary="Client connected",
+            payload={"client_id": client_id, "client_type": client_type},
+        )
         await self.runtime.broadcast_status(client_id)
 
         if client_type == "monitor":
@@ -120,6 +138,12 @@ class NexusHandlers:
     async def _handle_state_update(self, message: StateUpdateMessage) -> None:
         client_id = message.source
         self.runtime.state_store.set_state(client_id, message.payload.state)
+        self.runtime.record_event(
+            event_type="state_update",
+            source=client_id,
+            summary="State update received",
+            payload={"state": message.payload.state},
+        )
         await self.runtime.broadcast_client_state(client_id)
 
     async def _handle_query(self, websocket: WebSocketServerProtocol, message: QueryMessage) -> None:
@@ -171,6 +195,18 @@ class NexusHandlers:
                 source="nexus",
                 payload={"request_id": message.id, "delivered": delivered, "missing": missing},
             ),
+        )
+        self.runtime.record_event(
+            event_type="intent",
+            source=message.source,
+            summary=f"Intent routed to {len(delivered)} target(s)",
+            payload={
+                "action": message.payload.action,
+                "targets": message.payload.targets,
+                "delivered": delivered,
+                "missing": missing,
+                "params": message.payload.params,
+            },
         )
 
     async def _handle_capabilities_query(
@@ -252,6 +288,12 @@ class NexusHandlers:
 
     async def _handle_scene_save(self, websocket: WebSocketServerProtocol, message: SceneSaveMessage) -> None:
         request_id = f"scene_{uuid4().hex[:12]}"
+        self.runtime.record_event(
+            event_type="scene_save.requested",
+            source=message.source,
+            summary="Scene save requested",
+            payload=message.payload.model_dump(),
+        )
 
         targets = [
             record
@@ -322,9 +364,21 @@ class NexusHandlers:
         )
 
         self.runtime.log_bus.log("info", "Scene save bundled", requester=message.source, clients=len(normalized_snapshot))
+        self.runtime.record_event(
+            event_type="scene_save.completed",
+            source=message.source,
+            summary=f"Scene save completed ({len(normalized_snapshot)} clients)",
+            payload={"request_id": request_id, "snapshot": normalized_snapshot},
+        )
 
     async def _handle_scene_recall(self, websocket: WebSocketServerProtocol, message: SceneRecallMessage) -> None:
         snapshot = message.payload.snapshot
+        self.runtime.record_event(
+            event_type="scene_recall.requested",
+            source=message.source,
+            summary="Scene recall requested",
+            payload={"snapshot_clients": sorted(snapshot.keys())},
+        )
         delivered: list[str] = []
         missing: list[str] = []
 
@@ -367,6 +421,96 @@ class NexusHandlers:
             requester=message.source,
             delivered=len(delivered),
             missing=len(missing),
+        )
+        self.runtime.record_event(
+            event_type="scene_recall.completed",
+            source=message.source,
+            summary=f"Scene recall dispatched to {len(delivered)} client(s)",
+            payload={"delivered": delivered, "missing": missing},
+        )
+
+    async def _handle_recording_start(self, websocket: WebSocketServerProtocol, message: RecordingStartMessage) -> None:
+        session = self.runtime.event_recorder.start_recording(
+            session_id=message.payload.session_id,
+            session_name=message.payload.session_name,
+        )
+        self.runtime.record_event(
+            event_type="recording.start",
+            source=message.source,
+            summary=f"Recording started: {message.payload.session_name}",
+            payload=message.payload.model_dump(),
+        )
+        await self.runtime.send(
+            websocket,
+            make_message(
+                "recording.started",
+                source="nexus",
+                payload=session.as_dict(),
+            ),
+        )
+        self.runtime.log_bus.log(
+            "info",
+            "Recording started",
+            session_id=message.payload.session_id,
+            session_name=message.payload.session_name,
+            source=message.source,
+        )
+
+    async def _handle_recording_stop(self, websocket: WebSocketServerProtocol, message: RecordingStopMessage) -> None:
+        self.runtime.record_event(
+            event_type="recording.stop.requested",
+            source=message.source,
+            summary="Recording stop requested",
+            payload=message.payload.model_dump(),
+        )
+        session = self.runtime.event_recorder.stop_recording(message.payload.session_id)
+        if session is None:
+            await self.runtime.send(
+                websocket,
+                make_message(
+                    "error",
+                    source="nexus",
+                    payload={"error": "unknown_recording_session", "session_id": message.payload.session_id},
+                ),
+            )
+            self.runtime.record_event(
+                event_type="error",
+                source="nexus",
+                summary="Recording stop failed: unknown session",
+                payload=message.payload.model_dump(),
+            )
+            return
+
+        await self.runtime.send(
+            websocket,
+            make_message(
+                "recording.stopped",
+                source="nexus",
+                payload=session.as_dict(),
+            ),
+        )
+        self.runtime.log_bus.log("info", "Recording stopped", session_id=message.payload.session_id, source=message.source)
+
+    async def _handle_recording_request(self, websocket: WebSocketServerProtocol, message: RecordingRequestMessage) -> None:
+        session = self.runtime.event_recorder.get_session_log(message.payload.session_id)
+        if session is None:
+            await self.runtime.send(
+                websocket,
+                make_message(
+                    "recording.log",
+                    source="nexus",
+                    payload={"session_id": message.payload.session_id, "log": None, "found": False},
+                ),
+            )
+            return
+
+        await self.runtime.send(
+            websocket,
+            make_message(
+                "recording.log",
+                source="nexus",
+                payload={"session_id": message.payload.session_id, "log": session.as_dict(), "found": True},
+            ),
         )
 
     async def _handle_scene_state(self, message: SceneStateMessage) -> None:

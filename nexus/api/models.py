@@ -62,6 +62,19 @@ class SceneStatePayload(BaseModel):
     state: dict[str, Any] = Field(default_factory=dict)
 
 
+class RecordingStartPayload(BaseModel):
+    session_name: str
+    session_id: str
+
+
+class RecordingStopPayload(BaseModel):
+    session_id: str
+
+
+class RecordingRequestPayload(BaseModel):
+    session_id: str
+
+
 class RegisterMessage(NexusMessage):
     type: Literal["register"]
     payload: RegisterPayload
@@ -112,6 +125,21 @@ class SceneStateMessage(NexusMessage):
     payload: SceneStatePayload
 
 
+class RecordingStartMessage(NexusMessage):
+    type: Literal["recording.start"]
+    payload: RecordingStartPayload
+
+
+class RecordingStopMessage(NexusMessage):
+    type: Literal["recording.stop"]
+    payload: RecordingStopPayload
+
+
+class RecordingRequestMessage(NexusMessage):
+    type: Literal["recording.request"]
+    payload: RecordingRequestPayload
+
+
 TypedMessage = Annotated[
     RegisterMessage
     | HeartbeatMessage
@@ -122,7 +150,10 @@ TypedMessage = Annotated[
     | CapabilitiesResultMessage
     | SceneSaveMessage
     | SceneRecallMessage
-    | SceneStateMessage,
+    | SceneStateMessage
+    | RecordingStartMessage
+    | RecordingStopMessage
+    | RecordingRequestMessage,
     Field(discriminator="type"),
 ]
 

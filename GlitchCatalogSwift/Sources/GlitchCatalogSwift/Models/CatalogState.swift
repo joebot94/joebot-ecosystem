@@ -17,12 +17,14 @@ final class CatalogState: ObservableObject {
     @Published var sessionGear: [SessionGearRecord] = []
     @Published var media: [MediaRecord] = []
     @Published var presets: [PresetRecord] = []
+    @Published var eventLog: EventLogRecord?
 
     @Published var selectedSessionID: UUID?
     @Published var selectedPresetID: String?
 
     @Published var pendingSnapshotDraft: PendingSnapshotDraft?
     @Published var isSnapshotInFlight = false
+    @Published var recordingSessionID: String?
     @Published var toastMessage: String?
 
     let nexusClient = NexusClient(clientId: "glitch_catalog", clientType: "catalog")
@@ -38,6 +40,7 @@ final class CatalogState: ObservableObject {
             [
                 "scene_save": true,
                 "scene_recall": true,
+                "recording": true,
                 "jbt_storage": true,
                 "snapshot": true,
             ]
@@ -64,6 +67,15 @@ final class CatalogState: ObservableObject {
     var selectedSession: SessionRecord? {
         guard let selectedSessionID else { return nil }
         return documentsBySessionID[selectedSessionID]?.session
+    }
+
+    var selectedSessionExternalID: String? {
+        selectedSessionID?.uuidString.lowercased()
+    }
+
+    var isRecordingCurrentSession: Bool {
+        guard let selectedSessionExternalID else { return false }
+        return recordingSessionID == selectedSessionExternalID
     }
 
     var selectedPreset: PresetRecord? {
@@ -95,6 +107,7 @@ final class CatalogState: ObservableObject {
             sessionGear = []
             media = []
             presets = []
+            eventLog = nil
             selectedPresetID = nil
             return
         }
@@ -104,6 +117,8 @@ final class CatalogState: ObservableObject {
         sessionGear = document.sessionGear
         media = document.media
         presets = document.presets.sorted { $0.createdAt > $1.createdAt }
+        eventLog = document.eventLog
+
         if let selectedPresetID, presets.contains(where: { $0.id == selectedPresetID }) {
             self.selectedPresetID = selectedPresetID
         } else {
@@ -131,7 +146,8 @@ final class CatalogState: ObservableObject {
             gear: [],
             sessionGear: [],
             media: [],
-            presets: []
+            presets: [],
+            eventLog: nil
         )
 
         documentsBySessionID[session.id] = document
@@ -181,6 +197,28 @@ final class CatalogState: ObservableObject {
         nexusClient.sendMessage(type: "scene_save", payload: [
             "session_name": selectedSession?.title ?? "",
         ])
+    }
+
+    func toggleRecording() {
+        guard nexusClient.isConnected else {
+            showToast("Connect to Nexus to record")
+            return
+        }
+        guard let selectedSession = selectedSession, let selectedSessionExternalID else {
+            showToast("Select a session first")
+            return
+        }
+
+        if isRecordingCurrentSession {
+            nexusClient.sendMessage(type: "recording.stop", payload: [
+                "session_id": selectedSessionExternalID,
+            ])
+        } else {
+            nexusClient.sendMessage(type: "recording.start", payload: [
+                "session_name": selectedSession.title,
+                "session_id": selectedSessionExternalID,
+            ])
+        }
     }
 
     func cancelPendingSnapshot() {
@@ -242,6 +280,14 @@ final class CatalogState: ObservableObject {
         ])
     }
 
+    func eventTimelineRows() -> [String] {
+        guard let eventLog else { return [] }
+        return eventLog.events.map { entry in
+            let ts = prettyTimestamp(entry.timestamp)
+            return "\(ts)  [\(entry.type)]  \(entry.summary)"
+        }
+    }
+
     func presetDetailsText(_ preset: PresetRecord) -> String {
         let payload = preset.snapshot.mapValues { $0.anyValue }
         guard JSONSerialization.isValidJSONObject(payload),
@@ -259,7 +305,7 @@ final class CatalogState: ObservableObject {
 
         let out = DateFormatter()
         out.locale = Locale(identifier: "en_US_POSIX")
-        out.dateFormat = "yyyy-MM-dd HH:mm"
+        out.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return out.string(from: date)
     }
 
@@ -305,6 +351,12 @@ final class CatalogState: ObservableObject {
             handleSceneSaved(message)
         case "scene_recalled":
             showToast("Preset recalled successfully")
+        case "recording.started":
+            handleRecordingStarted(message)
+        case "recording.stopped":
+            handleRecordingStopped(message)
+        case "recording.log":
+            handleRecordingLog(message)
         default:
             break
         }
@@ -338,6 +390,71 @@ final class CatalogState: ObservableObject {
         )
     }
 
+    private func handleRecordingStarted(_ message: NexusMessage) {
+        guard let sessionID = message.payload["session_id"]?.anyValue as? String else {
+            return
+        }
+        recordingSessionID = sessionID
+        showToast("Recording started")
+    }
+
+    private func handleRecordingStopped(_ message: NexusMessage) {
+        guard let sessionID = message.payload["session_id"]?.anyValue as? String else {
+            return
+        }
+        if recordingSessionID == sessionID {
+            recordingSessionID = nil
+        }
+        showToast("Recording stopped")
+        nexusClient.sendMessage(type: "recording.request", payload: [
+            "session_id": sessionID,
+        ])
+    }
+
+    private func handleRecordingLog(_ message: NexusMessage) {
+        let found = (message.payload["found"]?.anyValue as? Bool) ?? false
+        guard found else {
+            showToast("No event log found")
+            return
+        }
+
+        guard let rawLog = message.payload["log"]?.anyValue,
+              let parsed = decodeEventLog(from: rawLog)
+        else {
+            showToast("Failed to decode event log")
+            return
+        }
+
+        persistEventLog(parsed)
+        showToast("Event log synced")
+    }
+
+    private func decodeEventLog(from value: Any) -> EventLogRecord? {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let decoded = try? JSONDecoder().decode(EventLogRecord.self, from: data)
+        else {
+            return nil
+        }
+        return decoded
+    }
+
+    private func persistEventLog(_ log: EventLogRecord) {
+        let sessionUUID: UUID? = UUID(uuidString: log.sessionID)
+        let targetID = sessionUUID ?? selectedSessionID
+        guard let targetID, var document = documentsBySessionID[targetID] else {
+            return
+        }
+
+        document.eventLog = log
+        documentsBySessionID[targetID] = document
+        store.saveSessionDocument(document)
+
+        if selectedSessionID == targetID {
+            eventLog = log
+        }
+    }
+
     private func showToast(_ message: String) {
         toastMessage = message
         Task { [weak self] in
@@ -357,6 +474,7 @@ final class CatalogState: ObservableObject {
             "media_count": mediaForSelectedSession.count,
             "gear_chain": gearChainForSelectedSession,
             "preset_count": presets.count,
+            "is_recording": isRecordingCurrentSession,
         ]
     }
 }

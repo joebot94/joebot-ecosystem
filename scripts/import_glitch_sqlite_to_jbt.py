@@ -176,6 +176,7 @@ def build_documents(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], Imp
             "sessionGear": session_gear_links,
             "media": session_media,
             "presets": [],
+            "event_log": None,
         }
         documents.append(document)
 

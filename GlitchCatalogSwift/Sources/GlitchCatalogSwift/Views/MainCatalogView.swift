@@ -188,6 +188,21 @@ struct MainCatalogView: View {
                 .disabled(!state.nexusClient.isConnected || state.isSnapshotInFlight || state.selectedSession == nil)
                 .help(state.nexusClient.isConnected ? "Capture a studio snapshot" : "Connect to Nexus to snapshot")
 
+                Button {
+                    state.toggleRecording()
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(state.isRecordingCurrentSession ? Color.red : Color.gray)
+                            .frame(width: 9, height: 9)
+                        Text(state.isRecordingCurrentSession ? "Stop" : "Record")
+                    }
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 110)
+                .disabled(!state.nexusClient.isConnected || state.selectedSession == nil)
+                .help(state.nexusClient.isConnected ? "Start/stop recording session events" : "Connect to Nexus to record")
+
                 Picker("Theme", selection: $preset) {
                     ForEach(CatalogThemePreset.allCases) { item in
                         Text(item.windowTitle).tag(item)
@@ -436,7 +451,7 @@ struct MainCatalogView: View {
                     .buttonStyle(RetroButtonStyle(theme: theme))
                     .frame(width: 360)
 
-                Text("Tapes: \(state.tapesForSelectedSession.count) | Gear: \(state.gearChainForSelectedSession.count) | Media: \(filteredMedia.count) | Presets: \(state.presets.count)")
+                Text("Tapes: \(state.tapesForSelectedSession.count) | Gear: \(state.gearChainForSelectedSession.count) | Media: \(filteredMedia.count) | Presets: \(state.presets.count) | Events: \(state.eventLog?.events.count ?? 0)")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity)
@@ -475,8 +490,30 @@ struct MainCatalogView: View {
                         Text(state.selectedSession?.notes ?? "No session selected")
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(theme.strongText)
+                            .lineLimit(4)
 
-                        Spacer(minLength: 0)
+                        if let eventLog = state.eventLog {
+                            Divider()
+                                .overlay(theme.border)
+
+                            Text("Timeline [\(eventLog.sessionName)]")
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundStyle(theme.accent)
+
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 4) {
+                                    ForEach(eventLog.events.reversed()) { event in
+                                        Text("\(state.prettyTimestamp(event.timestamp))  [\(event.type)]  \(event.summary)")
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                            }
+                            .background(theme.previewBackground)
+                            .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+                        } else {
+                            Spacer(minLength: 0)
+                        }
                     }
                     .padding(6)
                     .background(theme.previewBackground)

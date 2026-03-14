@@ -57,6 +57,34 @@ struct PresetRecord: Codable, Identifiable, Hashable {
     }
 }
 
+struct EventLogEntry: Codable, Hashable, Identifiable {
+    var timestamp: String
+    var type: String
+    var source: String
+    var summary: String
+    var payload: [String: AnyCodable]
+
+    var id: String {
+        "\(timestamp)|\(type)|\(source)|\(summary)"
+    }
+}
+
+struct EventLogRecord: Codable, Hashable {
+    var sessionID: String
+    var sessionName: String
+    var startedAt: String
+    var stoppedAt: String?
+    var events: [EventLogEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case sessionName = "session_name"
+        case startedAt = "started_at"
+        case stoppedAt = "stopped_at"
+        case events
+    }
+}
+
 // One .jbt file contains one session plus its attached entities.
 struct SessionDocument: Codable {
     var jbtType: String
@@ -67,6 +95,7 @@ struct SessionDocument: Codable {
     var sessionGear: [SessionGearRecord]
     var media: [MediaRecord]
     var presets: [PresetRecord]
+    var eventLog: EventLogRecord?
 
     enum CodingKeys: String, CodingKey {
         case jbtType = "jbt_type"
@@ -77,6 +106,7 @@ struct SessionDocument: Codable {
         case sessionGear
         case media
         case presets
+        case eventLog = "event_log"
     }
 
     init(
@@ -87,7 +117,8 @@ struct SessionDocument: Codable {
         gear: [GearRecord],
         sessionGear: [SessionGearRecord],
         media: [MediaRecord],
-        presets: [PresetRecord] = []
+        presets: [PresetRecord] = [],
+        eventLog: EventLogRecord? = nil
     ) {
         self.jbtType = jbtType
         self.name = name
@@ -97,6 +128,7 @@ struct SessionDocument: Codable {
         self.sessionGear = sessionGear
         self.media = media
         self.presets = presets
+        self.eventLog = eventLog
     }
 
     init(from decoder: Decoder) throws {
@@ -107,6 +139,7 @@ struct SessionDocument: Codable {
         sessionGear = try container.decodeIfPresent([SessionGearRecord].self, forKey: .sessionGear) ?? []
         media = try container.decodeIfPresent([MediaRecord].self, forKey: .media) ?? []
         presets = try container.decodeIfPresent([PresetRecord].self, forKey: .presets) ?? []
+        eventLog = try container.decodeIfPresent(EventLogRecord.self, forKey: .eventLog)
         jbtType = try container.decodeIfPresent(String.self, forKey: .jbtType) ?? "glitch_session"
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? session.title
     }
@@ -121,6 +154,7 @@ struct SessionDocument: Codable {
         try container.encode(sessionGear, forKey: .sessionGear)
         try container.encode(media, forKey: .media)
         try container.encode(presets, forKey: .presets)
+        try container.encode(eventLog, forKey: .eventLog)
     }
 }
 
