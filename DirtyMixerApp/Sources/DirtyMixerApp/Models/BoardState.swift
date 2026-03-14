@@ -56,6 +56,13 @@ final class BoardState: ObservableObject {
             self?.asPayloadState() ?? [:]
         }
 
+        // Forward NexusClient change notifications so board-level UI stays in sync.
+        nexusClient.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &subscriptions)
+
         wireChannelObservers()
         connectToNexus()
     }

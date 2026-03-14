@@ -1,5 +1,6 @@
 import Foundation
 import JoebotSDK
+import Combine
 
 @MainActor
 final class CatalogState: ObservableObject {
@@ -13,6 +14,7 @@ final class CatalogState: ObservableObject {
     let nexusClient = NexusClient(clientId: "glitch_catalog", clientType: "catalog")
 
     private let store = JBTStore()
+    private var subscriptions: Set<AnyCancellable> = []
 
     init() {
         let data = store.load()
@@ -34,6 +36,13 @@ final class CatalogState: ObservableObject {
         nexusClient.currentStateProvider = { [weak self] in
             self?.statePayload() ?? [:]
         }
+
+        // Forward NexusClient updates so UI banners and controls stay current.
+        nexusClient.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &subscriptions)
 
         nexusClient.connect(to: "127.0.0.1", port: 8675)
     }
