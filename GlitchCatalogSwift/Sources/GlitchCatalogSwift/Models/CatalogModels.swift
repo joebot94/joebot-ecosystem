@@ -1,4 +1,5 @@
 import Foundation
+import JoebotSDK
 
 struct SessionRecord: Codable, Identifiable, Hashable {
     let id: UUID
@@ -45,13 +46,82 @@ struct MediaRecord: Codable, Identifiable, Hashable {
     var thumbnailPath: String
 }
 
+struct PresetRecord: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var createdAt: String
+    var snapshot: [String: AnyCodable]
+
+    var capturedClients: [String] {
+        snapshot.keys.sorted()
+    }
+}
+
 // One .jbt file contains one session plus its attached entities.
 struct SessionDocument: Codable {
+    var jbtType: String
+    var name: String
     var session: SessionRecord
     var tapes: [TapeRecord]
     var gear: [GearRecord]
     var sessionGear: [SessionGearRecord]
     var media: [MediaRecord]
+    var presets: [PresetRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case jbtType = "jbt_type"
+        case name
+        case session
+        case tapes
+        case gear
+        case sessionGear
+        case media
+        case presets
+    }
+
+    init(
+        jbtType: String = "glitch_session",
+        name: String,
+        session: SessionRecord,
+        tapes: [TapeRecord],
+        gear: [GearRecord],
+        sessionGear: [SessionGearRecord],
+        media: [MediaRecord],
+        presets: [PresetRecord] = []
+    ) {
+        self.jbtType = jbtType
+        self.name = name
+        self.session = session
+        self.tapes = tapes
+        self.gear = gear
+        self.sessionGear = sessionGear
+        self.media = media
+        self.presets = presets
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        session = try container.decode(SessionRecord.self, forKey: .session)
+        tapes = try container.decodeIfPresent([TapeRecord].self, forKey: .tapes) ?? []
+        gear = try container.decodeIfPresent([GearRecord].self, forKey: .gear) ?? []
+        sessionGear = try container.decodeIfPresent([SessionGearRecord].self, forKey: .sessionGear) ?? []
+        media = try container.decodeIfPresent([MediaRecord].self, forKey: .media) ?? []
+        presets = try container.decodeIfPresent([PresetRecord].self, forKey: .presets) ?? []
+        jbtType = try container.decodeIfPresent(String.self, forKey: .jbtType) ?? "glitch_session"
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? session.title
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(jbtType, forKey: .jbtType)
+        try container.encode(name, forKey: .name)
+        try container.encode(session, forKey: .session)
+        try container.encode(tapes, forKey: .tapes)
+        try container.encode(gear, forKey: .gear)
+        try container.encode(sessionGear, forKey: .sessionGear)
+        try container.encode(media, forKey: .media)
+        try container.encode(presets, forKey: .presets)
+    }
 }
 
 // Legacy format kept for one-time migration support.

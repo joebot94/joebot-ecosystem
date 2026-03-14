@@ -35,6 +35,7 @@ final class BoardState: ObservableObject {
     let nexusClient: NexusClient
 
     private var subscriptions: Set<AnyCancellable> = []
+    private var suppressStatePublishing = false
 
     init() {
         channels = (1...9).map { ChannelState(id: $0) }
@@ -54,6 +55,9 @@ final class BoardState: ObservableObject {
 
         nexusClient.currentStateProvider = { [weak self] in
             self?.asPayloadState() ?? [:]
+        }
+        nexusClient.onMessage = { [weak self] message in
+            self?.handleNexusMessage(message)
         }
 
         // Forward NexusClient change notifications so board-level UI stays in sync.
@@ -110,7 +114,8 @@ final class BoardState: ObservableObject {
                 .combineLatest(channel.$inputBEnabled, channel.$mix)
                 .dropFirst()
                 .sink { [weak self] _, _, _ in
-                    self?.publishState()
+                    guard let self, !self.suppressStatePublishing else { return }
+                    self.publishState()
                 }
                 .store(in: &subscriptions)
         }
@@ -118,6 +123,80 @@ final class BoardState: ObservableObject {
 
     private func publishState() {
         nexusClient.sendStateUpdate(asPayloadState())
+    }
+
+    private func handleNexusMessage(_ message: NexusMessage) {
+        guard message.type == "scene.recall" else { return }
+        guard let state = message.payload["state"]?.anyValue as? [String: Any] else { return }
+        applyRecalledState(state)
+    }
+
+    private func applyRecalledState(_ state: [String: Any]) {
+        suppressStatePublishing = true
+        defer {
+            suppressStatePublishing = false
+            publishState()
+        }
+
+        if let modeValue = state["mode"] as? String, let restoredMode = ControlMode(rawValue: modeValue) {
+            mode = restoredMode
+        }
+
+        guard let channelRows = state["channels"] as? [[String: Any]] else { return }
+        for row in channelRows {
+            guard let channelID = int(from: row["id"]),
+                  let channel = channels.first(where: { $0.id == channelID })
+            else {
+                continue
+            }
+
+            if let inputA = bool(from: row["input_a"]) {
+                channel.inputAEnabled = inputA
+            }
+            if let inputB = bool(from: row["input_b"]) {
+                channel.inputBEnabled = inputB
+            }
+            if let mixValue = double(from: row["mix"]) {
+                channel.mix = max(0, min(255, mixValue))
+            }
+        }
+    }
+
+    private func int(from value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            return value
+        case let value as Double:
+            return Int(value)
+        case let value as NSNumber:
+            return value.intValue
+        default:
+            return nil
+        }
+    }
+
+    private func double(from value: Any?) -> Double? {
+        switch value {
+        case let value as Double:
+            return value
+        case let value as Int:
+            return Double(value)
+        case let value as NSNumber:
+            return value.doubleValue
+        default:
+            return nil
+        }
+    }
+
+    private func bool(from value: Any?) -> Bool? {
+        switch value {
+        case let value as Bool:
+            return value
+        case let value as NSNumber:
+            return value.boolValue
+        default:
+            return nil
+        }
     }
 
     private func asPayloadState() -> [String: Any] {

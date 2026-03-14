@@ -162,6 +162,8 @@ def build_documents(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], Imp
             notes = f"{notes}\n{tags_line}".strip()
 
         document = {
+            "jbt_type": "glitch_session",
+            "name": sess["title"] or f"Session {session_pk}",
             "session": {
                 "id": session_uuid,
                 "title": sess["title"] or f"Session {session_pk}",
@@ -173,6 +175,7 @@ def build_documents(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], Imp
             "gear": session_gear_defs,
             "sessionGear": session_gear_links,
             "media": session_media,
+            "presets": [],
         }
         documents.append(document)
 

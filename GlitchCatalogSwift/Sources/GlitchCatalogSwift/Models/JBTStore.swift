@@ -102,11 +102,13 @@ final class JBTStore {
                 let media = decoded.media.filter { $0.sessionID == session.id }
 
                 return SessionDocument(
+                    name: session.title,
                     session: session,
                     tapes: tapes,
                     gear: gear,
                     sessionGear: links,
-                    media: media
+                    media: media,
+                    presets: []
                 )
             }
 
@@ -139,6 +141,7 @@ final class JBTStore {
         ]
 
         return SessionDocument(
+            name: session.title,
             session: session,
             tapes: [
                 TapeRecord(
@@ -167,7 +170,8 @@ final class JBTStore {
                     notes: "Best color break",
                     thumbnailPath: "/Volumes/GLITCH/BasementBurnIn/take01.jpg"
                 )
-            ]
+            ],
+            presets: []
         )
     }
 }

@@ -50,6 +50,11 @@ class CapabilitiesResultPayload(BaseModel):
 
 class SceneSavePayload(BaseModel):
     include_offline: bool = True
+    session_name: str | None = None
+
+
+class SceneRecallPayload(BaseModel):
+    snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class SceneStatePayload(BaseModel):
@@ -97,6 +102,11 @@ class SceneSaveMessage(NexusMessage):
     payload: SceneSavePayload = Field(default_factory=SceneSavePayload)
 
 
+class SceneRecallMessage(NexusMessage):
+    type: Literal["scene_recall"]
+    payload: SceneRecallPayload
+
+
 class SceneStateMessage(NexusMessage):
     type: Literal["scene.state"]
     payload: SceneStatePayload
@@ -111,6 +121,7 @@ TypedMessage = Annotated[
     | CapabilitiesQueryMessage
     | CapabilitiesResultMessage
     | SceneSaveMessage
+    | SceneRecallMessage
     | SceneStateMessage,
     Field(discriminator="type"),
 ]

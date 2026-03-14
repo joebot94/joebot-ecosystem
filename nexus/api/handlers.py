@@ -17,6 +17,7 @@ from api.models import (
     NexusMessage,
     QueryMessage,
     RegisterMessage,
+    SceneRecallMessage,
     SceneSaveMessage,
     SceneStateMessage,
     StateUpdateMessage,
@@ -61,6 +62,9 @@ class NexusHandlers:
             return
         if msg_type == "scene_save" and isinstance(message, SceneSaveMessage):
             await self._handle_scene_save(websocket, message)
+            return
+        if msg_type == "scene_recall" and isinstance(message, SceneRecallMessage):
+            await self._handle_scene_recall(websocket, message)
             return
         if msg_type == "scene.state" and isinstance(message, SceneStateMessage):
             await self._handle_scene_state(message)
@@ -288,20 +292,21 @@ class NexusHandlers:
                 self.runtime.pending_scene_requests.pop(f"{request_id}:{target_id}", None)
 
             scene_bundle[target_id] = {
-                "online": True,
-                "state": client_state,
-                "state_summary": self.runtime.state_store.summary(target_id),
+                target_id: client_state,
             }
 
         if message.payload.include_offline:
             for record in self.runtime.registry.all_records():
                 if record.client_id in scene_bundle:
                     continue
-                scene_bundle[record.client_id] = {
-                    "online": record.online,
-                    "state": self.runtime.state_store.get_state(record.client_id),
-                    "state_summary": self.runtime.state_store.summary(record.client_id),
-                }
+                scene_bundle[record.client_id] = self.runtime.state_store.get_state(record.client_id)
+
+        normalized_snapshot: dict[str, Any] = {}
+        for key, value in scene_bundle.items():
+            if isinstance(value, dict) and key in value:
+                normalized_snapshot[key] = value[key]
+            else:
+                normalized_snapshot[key] = value
 
         await self.runtime.send(
             websocket,
@@ -310,13 +315,59 @@ class NexusHandlers:
                 source="nexus",
                 payload={
                     "request_id": request_id,
-                    "snapshot": scene_bundle,
-                    "client_count": len(scene_bundle),
+                    "snapshot": normalized_snapshot,
+                    "client_count": len(normalized_snapshot),
                 },
             ),
         )
 
-        self.runtime.log_bus.log("info", "Scene save bundled", requester=message.source, clients=len(scene_bundle))
+        self.runtime.log_bus.log("info", "Scene save bundled", requester=message.source, clients=len(normalized_snapshot))
+
+    async def _handle_scene_recall(self, websocket: WebSocketServerProtocol, message: SceneRecallMessage) -> None:
+        snapshot = message.payload.snapshot
+        delivered: list[str] = []
+        missing: list[str] = []
+
+        for target_id, target_state in snapshot.items():
+            record = self.runtime.registry.get(target_id)
+            if record is None or not record.online or record.websocket is None:
+                missing.append(target_id)
+                continue
+
+            delivered.append(target_id)
+            await self.runtime.send(
+                record.websocket,
+                make_message(
+                    "scene.recall",
+                    source="nexus",
+                    payload={
+                        "request_id": message.id,
+                        "requester": message.source,
+                        "state": target_state,
+                    },
+                ),
+            )
+
+        await self.runtime.send(
+            websocket,
+            make_message(
+                "scene_recalled",
+                source="nexus",
+                payload={
+                    "request_id": message.id,
+                    "delivered": delivered,
+                    "missing": missing,
+                },
+            ),
+        )
+
+        self.runtime.log_bus.log(
+            "info",
+            "Scene recall dispatched",
+            requester=message.source,
+            delivered=len(delivered),
+            missing=len(missing),
+        )
 
     async def _handle_scene_state(self, message: SceneStateMessage) -> None:
         self.runtime.state_store.set_state(message.source, message.payload.state)

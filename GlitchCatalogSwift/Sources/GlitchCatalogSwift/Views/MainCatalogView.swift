@@ -19,17 +19,6 @@ private enum CatalogThemePreset: String, CaseIterable, Identifiable {
         }
     }
 
-    var label: String {
-        switch self {
-        case .dos:
-            return "DOS"
-        case .neon:
-            return "Neon"
-        case .amber:
-            return "Amber"
-        }
-    }
-
     var theme: CatalogTheme {
         switch self {
         case .dos:
@@ -181,7 +170,7 @@ struct MainCatalogView: View {
 
             HStack(spacing: 8) {
                 sessionsColumn
-                    .frame(width: 316)
+                    .frame(width: 330)
 
                 mainGrid
             }
@@ -191,12 +180,13 @@ struct MainCatalogView: View {
         .foregroundStyle(theme.text)
         .toolbar {
             ToolbarItemGroup {
-                Button("Snapshot") {
+                Button(state.isSnapshotInFlight ? "Snapshot..." : "Snapshot") {
                     state.sendSnapshot()
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
                 .frame(width: 120)
-                .disabled(!state.nexusClient.isConnected)
+                .disabled(!state.nexusClient.isConnected || state.isSnapshotInFlight || state.selectedSession == nil)
+                .help(state.nexusClient.isConnected ? "Capture a studio snapshot" : "Connect to Nexus to snapshot")
 
                 Picker("Theme", selection: $preset) {
                     ForEach(CatalogThemePreset.allCases) { item in
@@ -206,11 +196,6 @@ struct MainCatalogView: View {
                 .frame(width: 170)
 
                 NexusStatusIndicator(client: state.nexusClient)
-            }
-        }
-        .onChange(of: kindOptions) { _, next in
-            if !next.contains(selectedKindFilter) {
-                selectedKindFilter = "All kinds"
             }
         }
         .sheet(isPresented: $showingNewSessionSheet) {
@@ -252,6 +237,20 @@ struct MainCatalogView: View {
                     .frame(width: 420, height: 220)
             }
         }
+        .sheet(item: Binding(
+            get: { state.pendingSnapshotDraft },
+            set: { state.pendingSnapshotDraft = $0 }
+        )) { draft in
+            PresetNameSheet(
+                defaultName: draft.defaultName,
+                onCancel: {
+                    state.cancelPendingSnapshot()
+                },
+                onConfirm: { name in
+                    state.confirmPendingSnapshot(name: name)
+                }
+            )
+        }
         .alert("Delete Session?", isPresented: $showingDeleteSessionAlert) {
             Button("Delete", role: .destructive) {
                 state.deleteSelectedSession()
@@ -260,6 +259,27 @@ struct MainCatalogView: View {
         } message: {
             Text("This removes the selected .jbt session file.")
         }
+        .onChange(of: kindOptions) { _, next in
+            if !next.contains(selectedKindFilter) {
+                selectedKindFilter = "All kinds"
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let toast = state.toastMessage {
+                Text(toast)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(theme.accent, lineWidth: 1)
+                    )
+                    .padding(14)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: state.toastMessage)
     }
 
     private var topBar: some View {
@@ -322,18 +342,83 @@ struct MainCatalogView: View {
                     Button("New Session") {
                         showingNewSessionSheet = true
                     }
-                        .buttonStyle(RetroButtonStyle(theme: theme))
+                    .buttonStyle(RetroButtonStyle(theme: theme))
+
                     Button("Edit Session") {
                         showingEditSessionSheet = true
                     }
-                        .buttonStyle(RetroButtonStyle(theme: theme))
-                        .disabled(state.selectedSession == nil)
+                    .buttonStyle(RetroButtonStyle(theme: theme))
+                    .disabled(state.selectedSession == nil)
+
                     Button("Delete Session") {
                         showingDeleteSessionAlert = true
                     }
-                        .buttonStyle(RetroButtonStyle(theme: theme))
-                        .disabled(state.selectedSession == nil)
+                    .buttonStyle(RetroButtonStyle(theme: theme))
+                    .disabled(state.selectedSession == nil)
                 }
+
+                presetsSection
+                    .frame(height: 240)
+            }
+        }
+    }
+
+    private var presetsSection: some View {
+        RetroPanel(title: "Presets", theme: theme) {
+            if state.presets.isEmpty {
+                Text("No presets yet")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(6)
+                    .background(theme.panelInner)
+                    .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(state.presets) { preset in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Button {
+                                    state.selectPreset(preset.id)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(preset.name)
+                                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                            .lineLimit(1)
+                                        Text(state.prettyTimestamp(preset.createdAt))
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.muted)
+                                        Text(preset.capturedClients.joined(separator: ", "))
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .lineLimit(1)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(5)
+                                }
+                                .buttonStyle(.plain)
+                                .background(state.selectedPresetID == preset.id ? theme.selection : theme.panelInner)
+                                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+
+                                HStack(spacing: 6) {
+                                    Button("Recall") {
+                                        state.recallPreset(preset)
+                                    }
+                                    .buttonStyle(RetroButtonStyle(theme: theme))
+                                    .disabled(!state.nexusClient.isConnected)
+                                    .help(state.nexusClient.isConnected ? "Recall this preset" : "Connect to Nexus to recall")
+
+                                    Button("Delete") {
+                                        state.deletePreset(preset.id)
+                                    }
+                                    .buttonStyle(RetroButtonStyle(theme: theme))
+                                }
+                            }
+                        }
+                    }
+                    .padding(2)
+                }
+                .background(theme.panelInner)
+                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
             }
         }
     }
@@ -351,7 +436,7 @@ struct MainCatalogView: View {
                     .buttonStyle(RetroButtonStyle(theme: theme))
                     .frame(width: 360)
 
-                Text("Tapes: \(state.tapesForSelectedSession.count) | Gear: \(state.gearChainForSelectedSession.count) | Media: \(filteredMedia.count)")
+                Text("Tapes: \(state.tapesForSelectedSession.count) | Gear: \(state.gearChainForSelectedSession.count) | Media: \(filteredMedia.count) | Presets: \(state.presets.count)")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity)
@@ -362,20 +447,41 @@ struct MainCatalogView: View {
             }
 
             RetroPanel(title: "Preview", theme: theme) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Hover/select items to preview. Session summary shown when idle.")
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(theme.accent)
+                if let preset = state.selectedPreset {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Preset: \(preset.name)")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(theme.strongText)
+                        Text("Captured: \(state.prettyTimestamp(preset.createdAt))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(theme.accent)
 
-                    Text(state.selectedSession?.notes ?? "No session selected")
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(theme.strongText)
+                        ScrollView {
+                            Text(state.presetDetailsText(preset))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(theme.strongText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(6)
+                        }
+                        .background(theme.previewBackground)
+                        .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Hover/select items to preview. Session summary shown when idle.")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(theme.accent)
 
-                    Spacer(minLength: 0)
+                        Text(state.selectedSession?.notes ?? "No session selected")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(theme.strongText)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(6)
+                    .background(theme.previewBackground)
+                    .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
                 }
-                .padding(6)
-                .background(theme.previewBackground)
-                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
             }
             .frame(maxHeight: .infinity)
         }
@@ -550,7 +656,7 @@ private struct SessionEditorSheet: View {
             DatePicker("Date", selection: $date, displayedComponents: [.date])
             TextField("Location", text: $location)
             TextField("Notes", text: $notes, axis: .vertical)
-                .lineLimit(4...8)
+                .lineLimit(4 ... 8)
 
             HStack {
                 Spacer()
@@ -567,5 +673,46 @@ private struct SessionEditorSheet: View {
         }
         .padding(16)
         .frame(minWidth: 420, minHeight: 280)
+    }
+}
+
+private struct PresetNameSheet: View {
+    let defaultName: String
+    let onCancel: () -> Void
+    let onConfirm: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+
+    init(defaultName: String, onCancel: @escaping () -> Void, onConfirm: @escaping (String) -> Void) {
+        self.defaultName = defaultName
+        self.onCancel = onCancel
+        self.onConfirm = onConfirm
+        _name = State(initialValue: defaultName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Save Snapshot As Preset")
+                .font(.headline)
+
+            TextField("Preset name", text: $name)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    onCancel()
+                    dismiss()
+                }
+                Button("Save") {
+                    onConfirm(name)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
     }
 }
