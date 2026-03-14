@@ -7,3 +7,5 @@ Packages/
 __pycache__/
 .venv/
 .env
+.run/
+dist/

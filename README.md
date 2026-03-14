@@ -55,6 +55,16 @@ Useful commands:
 ./scripts/joebot-stack.sh down
 ```
 
+## Make Shortcuts
+
+From repo root:
+
+```bash
+make tabs      # open all 4 services in Terminal tabs
+make demo      # run automated protocol verification
+make package   # build .app bundles into ./dist
+```
+
 ## Current Scope
 
 Implemented for this milestone:
