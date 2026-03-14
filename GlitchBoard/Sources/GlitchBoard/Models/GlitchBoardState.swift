@@ -1,7 +1,9 @@
 import AVFoundation
+import AppKit
 import Combine
 import Foundation
 import JoebotSDK
+import UniformTypeIdentifiers
 
 @MainActor
 final class GlitchBoardState: NSObject, ObservableObject {
@@ -17,7 +19,21 @@ final class GlitchBoardState: NSObject, ObservableObject {
     @Published var isPlaying = false
     @Published var zoomScale: CGFloat = 1
     @Published var timelineViewportWidth: CGFloat = 1
-    @Published var lanes: [CueLane] = [
+    @Published var lanes: [CueLane] = GlitchBoardState.placeholderLanes
+    @Published var projectName = "Untitled Show"
+    @Published var activeProjectName = "No project loaded"
+
+    let nexusClient: NexusClient
+
+    private var audioPlayer: AVAudioPlayer?
+    private var loadedAudioURL: URL?
+    private var playheadTimer: Timer?
+    private var firedCueIDs: Set<UUID> = []
+    private var subscriptions: Set<AnyCancellable> = []
+    private var requestedCapabilityTargets: Set<String> = []
+    private var capabilitiesByClient: [String: [String: Any]] = [:]
+
+    private static let placeholderLanes: [CueLane] = [
         CueLane(
             id: "lane.dirty_mixer",
             name: "Dirty Mixer",
@@ -44,13 +60,6 @@ final class GlitchBoardState: NSObject, ObservableObject {
         )
     ]
 
-    let nexusClient: NexusClient
-
-    private var audioPlayer: AVAudioPlayer?
-    private var playheadTimer: Timer?
-    private var firedCueIDs: Set<UUID> = []
-    private var subscriptions: Set<AnyCancellable> = []
-
     override init() {
         nexusClient = NexusClient(clientId: "glitchboard_v1", clientType: "daw")
         super.init()
@@ -63,7 +72,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             guard let self else { return [:] }
             return [
                 "intents": ["glitchboard.cue.trigger"],
-                "lane_targets": self.lanes.map(\.target)
+                "lane_targets": self.lanes.map(\.target),
             ]
         }
 
@@ -73,8 +82,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 "song": self.selectedAudioFileName,
                 "bpm": self.bpm,
                 "cue_count": self.cues.count,
-                "lane_count": self.lanes.count
+                "lane_count": self.lanes.count,
             ]
+        }
+
+        nexusClient.onMessage = { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.handleNexusMessage(message)
+            }
         }
 
         wireNexusObservers()
@@ -104,7 +119,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     var selectedCueSummary: String {
         guard let selectedCue else { return "None" }
-        let laneName = lanes.first(where: { $0.id == selectedCue.laneID })?.name ?? "Unknown"
+        let laneName = lanes.first(where: { $0.id == selectedCue.laneID })?.name ?? "Unknown Lane"
         return "\(selectedCue.label) • \(laneName) • \(barBeatString(for: selectedCue.time))"
     }
 
@@ -136,6 +151,32 @@ final class GlitchBoardState: NSObject, ObservableObject {
         zoomScale = 1
     }
 
+    func promptSaveProject() {
+        let panel = NSSavePanel()
+        panel.title = "Save GlitchBoard Project"
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [UTType(filenameExtension: "jbt") ?? .json, .json]
+        panel.nameFieldStringValue = "\(safeProjectFileName()).jbt"
+
+        guard panel.runModal() == .OK, let chosenURL = panel.url else { return }
+        let destination = chosenURL.pathExtension.isEmpty
+            ? chosenURL.appendingPathExtension("jbt")
+            : chosenURL
+        saveProject(to: destination)
+    }
+
+    func promptLoadProject() {
+        let panel = NSOpenPanel()
+        panel.title = "Open GlitchBoard Project"
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "jbt") ?? .json, .json]
+
+        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+        loadProject(from: sourceURL)
+    }
+
     func loadAudio(from url: URL) {
         stop()
 
@@ -144,6 +185,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             player.prepareToPlay()
             audioPlayer = player
 
+            loadedAudioURL = url
             audioDuration = player.duration
             playheadTime = 0
             selectedAudioFileName = url.lastPathComponent
@@ -160,9 +202,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             }
         } catch {
             statusText = "Could not load audio: \(error.localizedDescription)"
-            waveform = []
-            audioDuration = 0
-            selectedAudioFileName = "No audio loaded"
+            clearAudioState()
         }
     }
 
@@ -293,46 +333,6 @@ final class GlitchBoardState: NSObject, ObservableObject {
         statusText = "Placed \(cue.label) at \(barBeatString(for: snappedTime))"
     }
 
-    private func wireNexusObservers() {
-        nexusClient.$isConnected
-            .combineLatest(nexusClient.$isConnecting, nexusClient.$connectedClients)
-            .sink { [weak self] _, _, _ in
-                self?.refreshLaneStatusesFromNexus()
-            }
-            .store(in: &subscriptions)
-    }
-
-    private func refreshLaneStatusesFromNexus() {
-        let connectedClients = nexusClient.connectedClients
-        for index in lanes.indices {
-            let lane = lanes[index]
-            lanes[index].status = resolvedLaneStatus(for: lane, connectedClients: connectedClients)
-        }
-    }
-
-    private func resolvedLaneStatus(for lane: CueLane, connectedClients: [NexusClientInfo]) -> LaneConnectionState {
-        if nexusClient.isConnecting {
-            return .connecting
-        }
-        guard nexusClient.isConnected else {
-            return .offline
-        }
-
-        let matches = connectedClients.filter { info in
-            let clientID = info.clientId.lowercased()
-            let clientType = info.clientType.lowercased()
-            return lane.discoveryHints.contains(where: { hint in
-                clientID.contains(hint) || clientType.contains(hint)
-            })
-        }
-
-        guard !matches.isEmpty else {
-            return .offline
-        }
-
-        return matches.contains(where: \.online) ? .online : .offline
-    }
-
     private func startPlayheadTimer() {
         stopPlayheadTimer()
         playheadTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
@@ -380,7 +380,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
                     "cue_id": cue.id.uuidString,
                     "label": cue.label,
                     "lane": lane.name,
-                    "bar_beat": barBeatString(for: cue.time)
+                    "bar_beat": barBeatString(for: cue.time),
                 ]
             )
 
@@ -399,6 +399,321 @@ final class GlitchBoardState: NSObject, ObservableObject {
         let minutes = Int(time / 60)
         let seconds = time - Double(minutes * 60)
         return String(format: "%02d:%04.1f", minutes, seconds)
+    }
+
+    private func clearAudioState() {
+        audioPlayer = nil
+        loadedAudioURL = nil
+        waveform = []
+        audioDuration = 0
+        playheadTime = 0
+        selectedAudioFileName = "No audio loaded"
+    }
+
+    private func safeProjectFileName() -> String {
+        let base = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty {
+            return "glitchboard_project"
+        }
+        return base.replacingOccurrences(of: "/", with: "-")
+    }
+
+    private func saveProject(to url: URL) {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let project = makeProjectDocument()
+            let data = try encoder.encode(project)
+            try data.write(to: url, options: .atomic)
+            activeProjectName = url.lastPathComponent
+            statusText = "Saved project to \(url.lastPathComponent)"
+        } catch {
+            statusText = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func loadProject(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            let document = try decoder.decode(JBTProjectFile.self, from: data)
+            applyProjectDocument(document, sourceURL: url)
+            activeProjectName = url.lastPathComponent
+            statusText = "Loaded project \(url.lastPathComponent)"
+        } catch {
+            statusText = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func makeProjectDocument() -> JBTProjectFile {
+        let cuesForFile: [JBTProjectFile.Cue] = cues.compactMap { cue in
+            guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { return nil }
+            let beatIndex = max(0, Int(round(cue.time / beatDuration)))
+            let bar = (beatIndex / 4) + 1
+            let beat = (beatIndex % 4) + 1
+            return JBTProjectFile.Cue(
+                id: cue.id.uuidString,
+                type: "one_shot",
+                bar: bar,
+                beat: beat,
+                timeSeconds: cue.time,
+                deviceID: lane.target,
+                action: "glitchboard.cue.trigger",
+                params: ["lane_id": lane.id],
+                muted: false,
+                label: cue.label,
+                color: lane.accentHex
+            )
+        }
+
+        let laneRows = lanes.map { lane in
+            JBTProjectFile.DeviceLane(
+                deviceID: lane.target,
+                label: lane.name,
+                color: lane.accentHex,
+                offlineBehavior: "skip",
+                queueTimeoutSeconds: 5
+            )
+        }
+
+        let songTitle = selectedAudioFileName == "No audio loaded"
+            ? "Untitled Song"
+            : selectedAudioFileName
+
+        let payload = JBTProjectFile.Payload(
+            title: songTitle,
+            audioPath: loadedAudioURL?.path,
+            bpm: bpm,
+            timeSignature: "4/4",
+            cues: cuesForFile,
+            deviceLanes: laneRows
+        )
+
+        return JBTProjectFile(
+            jbtType: "daw_project",
+            version: "1.0",
+            createdAt: ISO8601DateFormatter().string(from: Date()),
+            name: projectName,
+            payload: payload
+        )
+    }
+
+    private func applyProjectDocument(_ document: JBTProjectFile, sourceURL: URL) {
+        stop()
+        projectName = document.name
+        bpm = document.payload.bpm
+        fitZoom()
+
+        lanes = document.payload.deviceLanes.map { lane in
+            CueLane(
+                id: "lane.\(lane.deviceID)",
+                name: lane.label,
+                target: lane.deviceID,
+                status: .offline,
+                accentHex: lane.color,
+                discoveryHints: discoveryHints(from: "\(lane.label) \(lane.deviceID)")
+            )
+        }
+        if lanes.isEmpty {
+            lanes = Self.placeholderLanes
+        }
+
+        if let audioPath = document.payload.audioPath,
+           let resolvedURL = resolveAudioPath(audioPath, relativeTo: sourceURL.deletingLastPathComponent()),
+           FileManager.default.fileExists(atPath: resolvedURL.path)
+        {
+            loadAudio(from: resolvedURL)
+        } else {
+            clearAudioState()
+        }
+
+        var restoredCues: [TimelineCue] = []
+        for row in document.payload.cues {
+            let cueLaneID = lanes.first(where: { $0.target == row.deviceID })?.id ?? lanes.first?.id ?? "lane.unknown"
+            let cueTime = row.timeSeconds ?? timeFrom(bar: row.bar, beat: row.beat, beatDuration: beatDuration)
+            guard cueTime.isFinite else { continue }
+            let uuid = UUID(uuidString: row.id) ?? UUID()
+            restoredCues.append(TimelineCue(id: uuid, laneID: cueLaneID, time: max(0, cueTime), label: row.label))
+        }
+
+        cues = restoredCues.sorted { $0.time < $1.time }
+        firedCueIDs.removeAll()
+        selectCue(nil)
+        refreshLaneStatusesFromNexus()
+    }
+
+    private func timeFrom(bar: Int, beat: Int, beatDuration: Double) -> Double {
+        let clampedBar = max(1, bar)
+        let clampedBeat = max(1, min(4, beat))
+        let beatIndex = Double((clampedBar - 1) * 4 + (clampedBeat - 1))
+        return beatIndex * beatDuration
+    }
+
+    private func resolveAudioPath(_ path: String, relativeTo baseDirectory: URL) -> URL? {
+        let expanded = NSString(string: path).expandingTildeInPath
+        let candidate = URL(fileURLWithPath: expanded)
+        if candidate.path.hasPrefix("/") {
+            return candidate
+        }
+        return baseDirectory.appendingPathComponent(expanded)
+    }
+
+    private func discoveryHints(from text: String) -> [String] {
+        let lowered = text.lowercased()
+        let pieces = lowered
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        return Array(Set(pieces + [lowered]))
+    }
+
+    private func wireNexusObservers() {
+        nexusClient.$isConnected
+            .combineLatest(nexusClient.$isConnecting, nexusClient.$connectedClients)
+            .sink { [weak self] _, _, _ in
+                guard let self else { return }
+                if self.nexusClient.isConnected == false {
+                    self.requestedCapabilityTargets.removeAll()
+                    self.capabilitiesByClient.removeAll()
+                }
+                self.requestCapabilitiesIfNeeded()
+                self.refreshLaneStatusesFromNexus()
+            }
+            .store(in: &subscriptions)
+    }
+
+    private func handleNexusMessage(_ message: NexusMessage) {
+        guard message.type == "capabilities.result" else { return }
+        guard let target = message.payload["target"]?.anyValue as? String else { return }
+        let capabilities = message.payload["capabilities"]?.anyValue as? [String: Any] ?? [:]
+        capabilitiesByClient[target] = capabilities
+
+        if let index = lanes.firstIndex(where: { $0.target == target }),
+           let label = capabilities["label"] as? String,
+           !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            lanes[index].name = label
+        }
+    }
+
+    private func requestCapabilitiesIfNeeded() {
+        guard nexusClient.isConnected, !nexusClient.isConnecting else { return }
+        for client in nexusClient.connectedClients where client.online {
+            guard client.clientId != nexusClient.clientId, client.clientType != "monitor" else { continue }
+            if requestedCapabilityTargets.contains(client.clientId) {
+                continue
+            }
+            requestedCapabilityTargets.insert(client.clientId)
+            nexusClient.requestCapabilities(of: client.clientId)
+        }
+    }
+
+    private func refreshLaneStatusesFromNexus() {
+        syncLanesWithRegistry()
+
+        for index in lanes.indices {
+            let lane = lanes[index]
+            if let match = matchingClient(for: lane) {
+                lanes[index].target = match.clientId
+                lanes[index].status = resolvedStatus(for: match)
+            } else if nexusClient.isConnecting {
+                lanes[index].status = .connecting
+            } else {
+                lanes[index].status = .offline
+            }
+        }
+    }
+
+    private func syncLanesWithRegistry() {
+        let clients = nexusClient.connectedClients.filter { info in
+            info.clientId != nexusClient.clientId && info.clientType != "monitor"
+        }
+        guard !clients.isEmpty else { return }
+
+        var updated = lanes
+
+        for client in clients {
+            let alreadyMatched = updated.contains(where: { laneMatchesClient(lane: $0, client: client) })
+            if alreadyMatched {
+                continue
+            }
+
+            let discoveredLane = CueLane(
+                id: "lane.\(client.clientId)",
+                name: capabilitiesByClient[client.clientId]?["label"] as? String ?? prettyLabel(for: client.clientId),
+                target: client.clientId,
+                status: resolvedStatus(for: client),
+                accentHex: accentColorHex(for: client),
+                discoveryHints: discoveryHints(from: "\(client.clientId) \(client.clientType)")
+            )
+            updated.append(discoveredLane)
+        }
+
+        lanes = updated
+    }
+
+    private func matchingClient(for lane: CueLane) -> NexusClientInfo? {
+        nexusClient.connectedClients.first { client in
+            laneMatchesClient(lane: lane, client: client)
+        }
+    }
+
+    private func laneMatchesClient(lane: CueLane, client: NexusClientInfo) -> Bool {
+        if client.clientId == nexusClient.clientId || client.clientType == "monitor" {
+            return false
+        }
+
+        let clientID = client.clientId.lowercased()
+        let clientType = client.clientType.lowercased()
+        if lane.target.lowercased() == clientID {
+            return true
+        }
+
+        return lane.discoveryHints.contains { hint in
+            let normalized = hint.lowercased()
+            return clientID.contains(normalized) || clientType.contains(normalized)
+        }
+    }
+
+    private func resolvedStatus(for client: NexusClientInfo) -> LaneConnectionState {
+        if nexusClient.isConnecting {
+            return .connecting
+        }
+        guard nexusClient.isConnected else {
+            return .offline
+        }
+        return client.online ? .online : .offline
+    }
+
+    private func accentColorHex(for client: NexusClientInfo) -> String {
+        let lookup = "\(client.clientId) \(client.clientType)".lowercased()
+        if lookup.contains("mtpx") {
+            return "#00FFFF"
+        }
+        if lookup.contains("dirty") || lookup.contains("mixer") {
+            return "#FF6600"
+        }
+        if lookup.contains("atlas") || lookup.contains("extron") {
+            return "#00FF88"
+        }
+        if lookup.contains("text") {
+            return "#AA00FF"
+        }
+        if lookup.contains("daw") || lookup.contains("glitchboard") {
+            return "#FFCC00"
+        }
+        return "#888888"
+    }
+
+    private func prettyLabel(for clientID: String) -> String {
+        clientID
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ")
+            .map { chunk in
+                chunk.prefix(1).uppercased() + chunk.dropFirst()
+            }
+            .joined(separator: " ")
     }
 
     nonisolated private static func extractWaveform(url: URL, targetSampleCount: Int) throws -> [Float] {

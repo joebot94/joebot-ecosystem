@@ -8,8 +8,8 @@ enum LaneConnectionState: String, Hashable {
 
 struct CueLane: Identifiable, Hashable {
     let id: String
-    let name: String
-    let target: String
+    var name: String
+    var target: String
     var status: LaneConnectionState
     let accentHex: String
     let discoveryHints: [String]

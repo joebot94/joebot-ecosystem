@@ -61,6 +61,14 @@ struct GlitchBoardMainView: View {
             }
             .buttonStyle(.borderedProminent)
 
+            Button("Load JBT") {
+                state.promptLoadProject()
+            }
+
+            Button("Save JBT") {
+                state.promptSaveProject()
+            }
+
             Button("Play") {
                 state.play()
             }
@@ -92,6 +100,15 @@ struct GlitchBoardMainView: View {
 
             Text(state.selectedAudioFileName)
                 .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Divider()
+                .frame(height: 22)
+
+            Text(state.activeProjectName)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
