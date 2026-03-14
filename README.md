@@ -33,6 +33,22 @@ cd nexus
 python3 test_client.py
 ```
 
+## One-Command Local Run
+
+From repo root:
+
+```bash
+./scripts/joebot-stack.sh up
+```
+
+Useful commands:
+
+```bash
+./scripts/joebot-stack.sh status
+./scripts/joebot-stack.sh logs
+./scripts/joebot-stack.sh down
+```
+
 ## Current Scope
 
 Implemented for this milestone:
