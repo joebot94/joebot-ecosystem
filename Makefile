@@ -1,4 +1,4 @@
-.PHONY: up down status logs tabs run demo package
+.PHONY: up down status logs tabs run demo package import-db
 
 up:
 	./scripts/joebot-stack.sh up
@@ -22,3 +22,10 @@ demo:
 
 package:
 	./scripts/package-apps.sh
+
+import-db:
+	@if [ -z "$(DB)" ]; then \
+		echo "Usage: make import-db DB=/path/to/glitch_catalog.db"; \
+		exit 1; \
+	fi
+	python3 ./scripts/import_glitch_sqlite_to_jbt.py --db "$(DB)" $(if $(REPLACE),--replace-existing,)

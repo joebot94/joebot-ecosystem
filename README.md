@@ -64,6 +64,8 @@ make tabs      # rebuild app bundles, then launch Nexus + apps
 make run       # same as make tabs (recommended for interactive app windows)
 make demo      # run automated protocol verification
 make package   # build .app bundles into ./dist
+make import-db DB=/path/to/glitch_catalog.db  # convert SQLite -> session .jbt files
+make import-db DB=/path/to/glitch_catalog.db REPLACE=1  # replace existing .jbt files first
 ```
 
 ## Current Scope
