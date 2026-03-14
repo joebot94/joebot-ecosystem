@@ -45,6 +45,16 @@ struct MediaRecord: Codable, Identifiable, Hashable {
     var thumbnailPath: String
 }
 
+// One .jbt file contains one session plus its attached entities.
+struct SessionDocument: Codable {
+    var session: SessionRecord
+    var tapes: [TapeRecord]
+    var gear: [GearRecord]
+    var sessionGear: [SessionGearRecord]
+    var media: [MediaRecord]
+}
+
+// Legacy format kept for one-time migration support.
 struct CatalogData: Codable {
     var sessions: [SessionRecord]
     var tapes: [TapeRecord]

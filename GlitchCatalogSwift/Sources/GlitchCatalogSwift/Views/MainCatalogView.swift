@@ -136,6 +136,9 @@ struct MainCatalogView: View {
     @State private var preset: CatalogThemePreset = .dos
     @State private var searchText: String = ""
     @State private var selectedKindFilter: String = "All kinds"
+    @State private var showingNewSessionSheet = false
+    @State private var showingEditSessionSheet = false
+    @State private var showingDeleteSessionAlert = false
 
     private var theme: CatalogTheme { preset.theme }
 
@@ -210,6 +213,53 @@ struct MainCatalogView: View {
                 selectedKindFilter = "All kinds"
             }
         }
+        .sheet(isPresented: $showingNewSessionSheet) {
+            SessionEditorSheet(
+                mode: .new,
+                initialTitle: "",
+                initialDate: Date(),
+                initialLocation: "",
+                initialNotes: "",
+                onSave: { title, date, location, notes in
+                    state.createSession(
+                        title: title,
+                        date: CatalogState.format(date: date),
+                        location: location,
+                        notes: notes
+                    )
+                }
+            )
+        }
+        .sheet(isPresented: $showingEditSessionSheet) {
+            if let selected = state.selectedSession {
+                SessionEditorSheet(
+                    mode: .edit,
+                    initialTitle: selected.title,
+                    initialDate: CatalogState.parse(dateString: selected.date),
+                    initialLocation: selected.location,
+                    initialNotes: selected.notes,
+                    onSave: { title, date, location, notes in
+                        state.updateSelectedSession(
+                            title: title,
+                            date: CatalogState.format(date: date),
+                            location: location,
+                            notes: notes
+                        )
+                    }
+                )
+            } else {
+                Text("No session selected")
+                    .frame(width: 420, height: 220)
+            }
+        }
+        .alert("Delete Session?", isPresented: $showingDeleteSessionAlert) {
+            Button("Delete", role: .destructive) {
+                state.deleteSelectedSession()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the selected .jbt session file.")
+        }
     }
 
     private var topBar: some View {
@@ -242,7 +292,7 @@ struct MainCatalogView: View {
                     LazyVStack(alignment: .leading, spacing: 1) {
                         ForEach(filteredSessions) { session in
                             Button {
-                                state.selectedSessionID = session.id
+                                state.selectSession(session.id)
                             } label: {
                                 HStack(spacing: 6) {
                                     Text("\(session.date) - \(session.title) [tags: ]")
@@ -269,12 +319,20 @@ struct MainCatalogView: View {
                 .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
 
                 HStack(spacing: 6) {
-                    Button("New Session") {}
+                    Button("New Session") {
+                        showingNewSessionSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Edit Session") {}
+                    Button("Edit Session") {
+                        showingEditSessionSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Delete Session") {}
+                        .disabled(state.selectedSession == nil)
+                    Button("Delete Session") {
+                        showingDeleteSessionAlert = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
+                        .disabled(state.selectedSession == nil)
                 }
             }
         }
@@ -431,5 +489,83 @@ struct MainCatalogView: View {
                 }
             }
         }
+    }
+}
+
+private enum SessionEditorMode {
+    case new
+    case edit
+
+    var title: String {
+        switch self {
+        case .new:
+            return "New Session"
+        case .edit:
+            return "Edit Session"
+        }
+    }
+
+    var actionLabel: String {
+        switch self {
+        case .new:
+            return "Create"
+        case .edit:
+            return "Save"
+        }
+    }
+}
+
+private struct SessionEditorSheet: View {
+    let mode: SessionEditorMode
+    let onSave: (String, Date, String, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var date: Date
+    @State private var location: String
+    @State private var notes: String
+
+    init(
+        mode: SessionEditorMode,
+        initialTitle: String,
+        initialDate: Date,
+        initialLocation: String,
+        initialNotes: String,
+        onSave: @escaping (String, Date, String, String) -> Void
+    ) {
+        self.mode = mode
+        self.onSave = onSave
+        _title = State(initialValue: initialTitle)
+        _date = State(initialValue: initialDate)
+        _location = State(initialValue: initialLocation)
+        _notes = State(initialValue: initialNotes)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(mode.title)
+                .font(.headline)
+
+            TextField("Title", text: $title)
+            DatePicker("Date", selection: $date, displayedComponents: [.date])
+            TextField("Location", text: $location)
+            TextField("Notes", text: $notes, axis: .vertical)
+                .lineLimit(4...8)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                Button(mode.actionLabel) {
+                    onSave(title.trimmingCharacters(in: .whitespacesAndNewlines), date, location, notes)
+                    dismiss()
+                }
+                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 420, minHeight: 280)
     }
 }

@@ -1,36 +1,127 @@
 import Foundation
 
 final class JBTStore {
-    private let fileURL: URL
+    private let sessionsDirectoryURL: URL
+    private let legacyFileURL: URL
 
-    init(filename: String = "catalog_data.jbt") {
+    init() {
         let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        fileURL = docsDir.appendingPathComponent(filename)
-    }
 
-    func load() -> CatalogData {
+        sessionsDirectoryURL = docsDir
+            .appendingPathComponent("Joebot", isDirectory: true)
+            .appendingPathComponent("GlitchCatalog", isDirectory: true)
+            .appendingPathComponent("sessions", isDirectory: true)
+
+        legacyFileURL = docsDir.appendingPathComponent("catalog_data.jbt")
+
         do {
-            let data = try Data(contentsOf: fileURL)
-            let decoded = try JSONDecoder().decode(CatalogData.self, from: data)
-            return decoded
+            try FileManager.default.createDirectory(at: sessionsDirectoryURL, withIntermediateDirectories: true)
         } catch {
-            let seeded = seedData()
-            save(seeded)
-            return seeded
+            print("[JBTStore] directory create error: \(error)")
         }
     }
 
-    func save(_ data: CatalogData) {
+    func loadSessionDocuments() -> [SessionDocument] {
+        let fm = FileManager.default
+
         do {
-            let encoded = try JSONEncoder().encode(data)
-            try encoded.write(to: fileURL, options: [.atomic])
+            let files = try fm.contentsOfDirectory(
+                at: sessionsDirectoryURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+                .filter { $0.pathExtension.lowercased() == "jbt" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+            var docs: [SessionDocument] = []
+            for url in files {
+                do {
+                    let data = try Data(contentsOf: url)
+                    let decoded = try JSONDecoder().decode(SessionDocument.self, from: data)
+                    docs.append(decoded)
+                } catch {
+                    print("[JBTStore] failed to decode \(url.lastPathComponent): \(error)")
+                }
+            }
+
+            if !docs.isEmpty {
+                return docs
+            }
+        } catch {
+            print("[JBTStore] directory read error: \(error)")
+        }
+
+        if let migrated = migrateLegacyIfPresent() {
+            return migrated
+        }
+
+        let seeded = seedDocument()
+        saveSessionDocument(seeded)
+        return [seeded]
+    }
+
+    func saveSessionDocument(_ document: SessionDocument) {
+        do {
+            let encoded = try JSONEncoder().encode(document)
+            try encoded.write(to: url(for: document.session.id), options: [.atomic])
         } catch {
             print("[JBTStore] save error: \(error)")
         }
     }
 
-    private func seedData() -> CatalogData {
+    func deleteSessionDocument(sessionID: UUID) {
+        let targetURL = url(for: sessionID)
+        guard FileManager.default.fileExists(atPath: targetURL.path) else { return }
+
+        do {
+            try FileManager.default.removeItem(at: targetURL)
+        } catch {
+            print("[JBTStore] delete error: \(error)")
+        }
+    }
+
+    private func url(for sessionID: UUID) -> URL {
+        sessionsDirectoryURL.appendingPathComponent("\(sessionID.uuidString.lowercased()).jbt")
+    }
+
+    private func migrateLegacyIfPresent() -> [SessionDocument]? {
+        guard FileManager.default.fileExists(atPath: legacyFileURL.path) else {
+            return nil
+        }
+
+        do {
+            let data = try Data(contentsOf: legacyFileURL)
+            let decoded = try JSONDecoder().decode(CatalogData.self, from: data)
+
+            let documents = decoded.sessions.map { session in
+                let tapes = decoded.tapes.filter { $0.sessionID == session.id }
+                let links = decoded.sessionGear.filter { $0.sessionID == session.id }
+                let linkedGearIDs = Set(links.map { $0.gearID })
+                let gear = decoded.gear.filter { linkedGearIDs.contains($0.id) }
+                let media = decoded.media.filter { $0.sessionID == session.id }
+
+                return SessionDocument(
+                    session: session,
+                    tapes: tapes,
+                    gear: gear,
+                    sessionGear: links,
+                    media: media
+                )
+            }
+
+            for doc in documents {
+                saveSessionDocument(doc)
+            }
+
+            return documents
+        } catch {
+            print("[JBTStore] legacy migration failed: \(error)")
+            return nil
+        }
+    }
+
+    private func seedDocument() -> SessionDocument {
         let session = SessionRecord(
             id: UUID(),
             title: "Basement Burn-In",
@@ -42,8 +133,13 @@ final class JBTStore {
         let gearA = GearRecord(id: UUID(), name: "Panasonic AG-1980")
         let gearB = GearRecord(id: UUID(), name: "Video Toaster")
 
-        return CatalogData(
-            sessions: [session],
+        let sessionGear = [
+            SessionGearRecord(id: UUID(), sessionID: session.id, gearID: gearA.id, notes: "Deck A"),
+            SessionGearRecord(id: UUID(), sessionID: session.id, gearID: gearB.id, notes: "Feedback bus")
+        ]
+
+        return SessionDocument(
+            session: session,
             tapes: [
                 TapeRecord(
                     sessionID: session.id,
@@ -55,10 +151,7 @@ final class JBTStore {
                 )
             ],
             gear: [gearA, gearB],
-            sessionGear: [
-                SessionGearRecord(id: UUID(), sessionID: session.id, gearID: gearA.id, notes: "Deck A"),
-                SessionGearRecord(id: UUID(), sessionID: session.id, gearID: gearB.id, notes: "Feedback bus")
-            ],
+            sessionGear: sessionGear,
             media: [
                 MediaRecord(
                     id: UUID(),

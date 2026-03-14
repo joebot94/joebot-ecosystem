@@ -1,6 +1,6 @@
+import Combine
 import Foundation
 import JoebotSDK
-import Combine
 
 @MainActor
 final class CatalogState: ObservableObject {
@@ -15,15 +15,10 @@ final class CatalogState: ObservableObject {
 
     private let store = JBTStore()
     private var subscriptions: Set<AnyCancellable> = []
+    private var documentsBySessionID: [UUID: SessionDocument] = [:]
 
     init() {
-        let data = store.load()
-        sessions = data.sessions
-        tapes = data.tapes
-        gear = data.gear
-        sessionGear = data.sessionGear
-        media = data.media
-        selectedSessionID = sessions.first?.id
+        loadSessionDocuments()
 
         nexusClient.capabilitiesProvider = {
             [
@@ -49,26 +44,88 @@ final class CatalogState: ObservableObject {
 
     var selectedSession: SessionRecord? {
         guard let selectedSessionID else { return nil }
-        return sessions.first(where: { $0.id == selectedSessionID })
+        return documentsBySessionID[selectedSessionID]?.session
     }
 
     var tapesForSelectedSession: [TapeRecord] {
-        guard let selectedSessionID else { return [] }
-        return tapes.filter { $0.sessionID == selectedSessionID }
+        tapes
     }
 
     var mediaForSelectedSession: [MediaRecord] {
-        guard let selectedSessionID else { return [] }
-        return media.filter { $0.sessionID == selectedSessionID }
+        media
     }
 
     var gearChainForSelectedSession: [String] {
-        guard let selectedSessionID else { return [] }
-
-        let links = sessionGear.filter { $0.sessionID == selectedSessionID }
-        return links.compactMap { link in
-            gear.first(where: { $0.id == link.gearID })?.name
+        let linkedGearIDs = sessionGear.map(\.gearID)
+        return linkedGearIDs.compactMap { gearID in
+            gear.first(where: { $0.id == gearID })?.name
         }
+    }
+
+    func selectSession(_ sessionID: UUID?) {
+        selectedSessionID = sessionID
+
+        guard let sessionID, let document = documentsBySessionID[sessionID] else {
+            tapes = []
+            gear = []
+            sessionGear = []
+            media = []
+            return
+        }
+
+        tapes = document.tapes
+        gear = document.gear
+        sessionGear = document.sessionGear
+        media = document.media
+    }
+
+    func createSession(title: String, date: String, location: String, notes: String) {
+        let session = SessionRecord(
+            id: UUID(),
+            title: title,
+            date: date,
+            location: location,
+            notes: notes
+        )
+
+        let document = SessionDocument(
+            session: session,
+            tapes: [],
+            gear: [],
+            sessionGear: [],
+            media: []
+        )
+
+        documentsBySessionID[session.id] = document
+        store.saveSessionDocument(document)
+        refreshSessionIndex(selecting: session.id)
+    }
+
+    func updateSelectedSession(title: String, date: String, location: String, notes: String) {
+        guard let selectedSessionID, var document = documentsBySessionID[selectedSessionID] else { return }
+
+        document.session.title = title
+        document.session.date = date
+        document.session.location = location
+        document.session.notes = notes
+
+        documentsBySessionID[selectedSessionID] = document
+        store.saveSessionDocument(document)
+        refreshSessionIndex(selecting: selectedSessionID)
+    }
+
+    func deleteSelectedSession() {
+        guard let selectedSessionID else { return }
+        documentsBySessionID[selectedSessionID] = nil
+        store.deleteSessionDocument(sessionID: selectedSessionID)
+
+        let nextSelection = sessions
+            .filter { $0.id != selectedSessionID }
+            .sorted { $0.date > $1.date }
+            .first?
+            .id
+
+        refreshSessionIndex(selecting: nextSelection)
     }
 
     func sendSnapshot() {
@@ -78,12 +135,48 @@ final class CatalogState: ObservableObject {
         ])
     }
 
+    static func format(date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    static func parse(dateString: String) -> Date {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: dateString) ?? Date()
+    }
+
+    private func loadSessionDocuments() {
+        let docs = store.loadSessionDocuments()
+        documentsBySessionID = Dictionary(uniqueKeysWithValues: docs.map { ($0.session.id, $0) })
+        refreshSessionIndex(selecting: docs.first?.session.id)
+    }
+
+    private func refreshSessionIndex(selecting preferredID: UUID?) {
+        sessions = documentsBySessionID.values
+            .map(\.session)
+            .sorted { lhs, rhs in
+                if lhs.date == rhs.date {
+                    return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                }
+                return lhs.date > rhs.date
+            }
+
+        let targetID = preferredID ?? sessions.first?.id
+        selectSession(targetID)
+    }
+
     private func statePayload() -> [String: Any] {
         [
             "selected_session": selectedSession?.title ?? "none",
             "session_count": sessions.count,
-            "tape_count": tapes.count,
-            "media_count": media.count,
+            "tape_count": tapesForSelectedSession.count,
+            "media_count": mediaForSelectedSession.count,
             "gear_chain": gearChainForSelectedSession
         ]
     }
