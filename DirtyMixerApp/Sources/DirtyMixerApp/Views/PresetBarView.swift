@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PresetBarView: View {
     @ObservedObject var boardState: BoardState
+    var useLiquidGlass: Bool = false
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -29,11 +30,11 @@ struct PresetBarView: View {
                     .frame(width: 180)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(red: 0.17, green: 0.17, blue: 0.19))
+                            .fill(useLiquidGlass ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color(red: 0.17, green: 0.17, blue: 0.19)))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(slot.hasData ? Color.orange.opacity(0.6) : Color.white.opacity(0.08), lineWidth: 1)
+                            .stroke(slot.hasData ? Color.orange.opacity(useLiquidGlass ? 0.8 : 0.6) : Color.white.opacity(useLiquidGlass ? 0.24 : 0.08), lineWidth: 1)
                     )
                 }
             }

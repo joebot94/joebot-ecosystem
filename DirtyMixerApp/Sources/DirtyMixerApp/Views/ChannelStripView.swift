@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChannelStripView: View {
     @ObservedObject var channel: ChannelState
+    var useLiquidGlass: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -44,11 +45,11 @@ struct ChannelStripView: View {
         .frame(minWidth: 220)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(Color(red: 0.13, green: 0.13, blue: 0.15))
+                .fill(useLiquidGlass ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color(red: 0.13, green: 0.13, blue: 0.15)))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                .stroke(useLiquidGlass ? Color.white.opacity(0.24) : Color.white.opacity(0.08), lineWidth: 1)
         )
     }
 }

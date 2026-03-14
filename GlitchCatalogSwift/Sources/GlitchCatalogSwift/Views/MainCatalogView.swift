@@ -33,7 +33,8 @@ private enum CatalogThemePreset: String, CaseIterable, Identifiable {
                 border: Color.black.opacity(0.85),
                 selection: Color(red: 0.00, green: 0.24, blue: 0.72),
                 muted: Color.black.opacity(0.55),
-                strongText: .white
+                strongText: .white,
+                useLiquidGlass: false
             )
         case .neon:
             return CatalogTheme(
@@ -46,7 +47,8 @@ private enum CatalogThemePreset: String, CaseIterable, Identifiable {
                 border: Color.white.opacity(0.22),
                 selection: Color(red: 0.10, green: 0.28, blue: 0.43),
                 muted: Color.white.opacity(0.45),
-                strongText: Color(red: 0.90, green: 0.98, blue: 1.00)
+                strongText: Color(red: 0.90, green: 0.98, blue: 1.00),
+                useLiquidGlass: false
             )
         case .amber:
             return CatalogTheme(
@@ -59,7 +61,8 @@ private enum CatalogThemePreset: String, CaseIterable, Identifiable {
                 border: Color(red: 0.68, green: 0.40, blue: 0.07),
                 selection: Color(red: 0.45, green: 0.26, blue: 0.05),
                 muted: Color(red: 0.84, green: 0.55, blue: 0.17),
-                strongText: Color(red: 1.00, green: 0.80, blue: 0.37)
+                strongText: Color(red: 1.00, green: 0.80, blue: 0.37),
+                useLiquidGlass: false
             )
         }
     }
@@ -76,6 +79,23 @@ private struct CatalogTheme {
     let selection: Color
     let muted: Color
     let strongText: Color
+    let useLiquidGlass: Bool
+
+    func liquidized() -> CatalogTheme {
+        CatalogTheme(
+            background: Color(red: 0.11, green: 0.13, blue: 0.17),
+            panelBackground: Color.white.opacity(0.14),
+            panelInner: Color.white.opacity(0.08),
+            previewBackground: Color(red: 0.05, green: 0.10, blue: 0.18).opacity(0.85),
+            text: Color(red: 0.92, green: 0.96, blue: 1.00),
+            accent: Color(red: 0.34, green: 0.86, blue: 1.00),
+            border: Color.white.opacity(0.26),
+            selection: Color(red: 0.29, green: 0.67, blue: 0.90).opacity(0.45),
+            muted: Color.white.opacity(0.62),
+            strongText: .white,
+            useLiquidGlass: true
+        )
+    }
 }
 
 private struct RetroButtonStyle: ButtonStyle {
@@ -87,7 +107,16 @@ private struct RetroButtonStyle: ButtonStyle {
             .foregroundStyle(theme.text)
             .frame(maxWidth: .infinity)
             .frame(height: 28)
-            .background(configuration.isPressed ? theme.selection : theme.panelBackground)
+            .background(
+                Group {
+                    if theme.useLiquidGlass {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(configuration.isPressed ? AnyShapeStyle(theme.selection) : AnyShapeStyle(.regularMaterial))
+                    } else {
+                        configuration.isPressed ? theme.selection : theme.panelBackground
+                    }
+                }
+            )
             .overlay(
                 Rectangle()
                     .stroke(theme.border, lineWidth: 1)
@@ -112,7 +141,16 @@ private struct RetroPanel<Content: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(6)
-        .background(theme.panelBackground)
+        .background(
+            Group {
+                if theme.useLiquidGlass {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(.regularMaterial)
+                } else {
+                    theme.panelBackground
+                }
+            }
+        )
         .overlay(
             Rectangle()
                 .stroke(theme.border, lineWidth: 1)
@@ -123,6 +161,7 @@ private struct RetroPanel<Content: View>: View {
 struct MainCatalogView: View {
     @ObservedObject var state: CatalogState
 
+    @AppStorage("joebot.appearance.glitchcatalog") private var appearanceRawValue = StudioAppearancePreference.auto.rawValue
     @State private var preset: CatalogThemePreset = .dos
     @State private var searchText: String = ""
     @State private var selectedKindFilter: String = "All kinds"
@@ -138,7 +177,34 @@ struct MainCatalogView: View {
     @State private var showingGearPhotoImporter = false
     @State private var showingReplaySheet = false
 
-    private var theme: CatalogTheme { preset.theme }
+    private var appearancePreference: StudioAppearancePreference {
+        StudioAppearancePreference(rawValue: appearanceRawValue) ?? .auto
+    }
+
+    private var useLiquidGlass: Bool {
+        StudioAppearance.resolve(appearancePreference) == .liquid
+    }
+
+    private var theme: CatalogTheme {
+        let base = preset.theme
+        return useLiquidGlass ? base.liquidized() : base
+    }
+
+    @ViewBuilder
+    private var rootBackground: some View {
+        if useLiquidGlass {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.12, green: 0.14, blue: 0.18),
+                    Color(red: 0.08, green: 0.10, blue: 0.14),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        } else {
+            theme.background
+        }
+    }
 
     private var filteredSessions: [SessionRecord] {
         guard !searchText.isEmpty else { return state.sessions }
@@ -185,7 +251,7 @@ struct MainCatalogView: View {
             }
             .padding(8)
         }
-        .background(theme.background)
+        .background(rootBackground)
         .foregroundStyle(theme.text)
         .toolbar {
             ToolbarItemGroup {
@@ -218,6 +284,13 @@ struct MainCatalogView: View {
                     }
                 }
                 .frame(width: 170)
+
+                Picker("Appearance", selection: $appearanceRawValue) {
+                    ForEach(StudioAppearancePreference.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .frame(width: 110)
 
                 NexusStatusIndicator(client: state.nexusClient)
             }
