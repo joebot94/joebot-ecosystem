@@ -3,18 +3,24 @@ import Foundation
 import JoebotSDK
 
 @MainActor
-final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate {
+final class GlitchBoardState: NSObject, ObservableObject {
     @Published var bpm: Double = 140
     @Published var audioDuration: Double = 0
     @Published var playheadTime: Double = 0
     @Published var waveform: [Float] = []
     @Published var cues: [TimelineCue] = []
+    @Published var selectedCueID: UUID?
     @Published var selectedAudioFileName = "No audio loaded"
     @Published var statusText = "Load a song to start building cues."
     @Published var isPlaying = false
+    @Published var zoomScale: CGFloat = 1
+    @Published var timelineViewportWidth: CGFloat = 1
+    @Published var lanes: [CueLane] = [
+        CueLane(id: "lane.dirty_mixer", name: "Dirty Mixer", target: "device.dirty_mixer.1", status: .online, accentHex: "#FF6600"),
+        CueLane(id: "lane.mtpx_1", name: "MTPX Plus #1", target: "device.mtpx.1", status: .offline, accentHex: "#00FFFF"),
+        CueLane(id: "lane.atlas_1", name: "Atlas", target: "device.atlas.1", status: .connecting, accentHex: "#00FF88")
+    ]
 
-    let hardcodedLaneName = "Dirty Mixer"
-    let hardcodedLaneTarget = "device.dirty_mixer.1"
     let nexusClient: NexusClient
 
     private var audioPlayer: AVAudioPlayer?
@@ -25,22 +31,27 @@ final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate 
         nexusClient = NexusClient(clientId: "glitchboard_v1", clientType: "daw")
         super.init()
 
-        nexusClient.capabilitiesProvider = {
-            [
+        nexusClient.autoConnect = false
+        nexusClient.serverHost = "localhost"
+        nexusClient.serverPort = 8675
+
+        nexusClient.capabilitiesProvider = { [weak self] in
+            guard let self else { return [:] }
+            return [
                 "intents": ["glitchboard.cue.trigger"],
-                "lane_target": self.hardcodedLaneTarget
+                "lane_targets": self.lanes.map(\.target)
             ]
         }
 
-        nexusClient.currentStateProvider = {
-            [
+        nexusClient.currentStateProvider = { [weak self] in
+            guard let self else { return [:] }
+            return [
                 "song": self.selectedAudioFileName,
                 "bpm": self.bpm,
-                "cue_count": self.cues.count
+                "cue_count": self.cues.count,
+                "lane_count": self.lanes.count
             ]
         }
-
-        nexusClient.connect(to: "127.0.0.1", port: 8675)
     }
 
     var beatDuration: Double {
@@ -51,20 +62,68 @@ final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate 
         audioDuration > 0
     }
 
+    var totalCueCount: Int {
+        cues.count
+    }
+
+    var currentSongPositionString: String {
+        formatClock(playheadTime)
+    }
+
+    var selectedCue: TimelineCue? {
+        guard let selectedCueID else { return nil }
+        return cues.first(where: { $0.id == selectedCueID })
+    }
+
+    var selectedCueSummary: String {
+        guard let selectedCue else { return "None" }
+        let laneName = lanes.first(where: { $0.id == selectedCue.laneID })?.name ?? "Unknown"
+        return "\(selectedCue.label) • \(laneName) • \(barBeatString(for: selectedCue.time))"
+    }
+
+    var timelineContentWidth: CGFloat {
+        max(timelineViewportWidth, timelineViewportWidth * zoomScale)
+    }
+
+    func cues(for laneID: String) -> [TimelineCue] {
+        cues.filter { $0.laneID == laneID }.sorted { $0.time < $1.time }
+    }
+
+    func cueCount(for laneID: String) -> Int {
+        cues(for: laneID).count
+    }
+
+    func setTimelineViewportWidth(_ width: CGFloat) {
+        timelineViewportWidth = max(1, width)
+    }
+
+    func zoomIn() {
+        zoomScale = min(8, zoomScale * 1.25)
+    }
+
+    func zoomOut() {
+        zoomScale = max(1, zoomScale / 1.25)
+    }
+
+    func fitZoom() {
+        zoomScale = 1
+    }
+
     func loadAudio(from url: URL) {
         stop()
 
         do {
             let player = try AVAudioPlayer(contentsOf: url)
-            player.delegate = self
             player.prepareToPlay()
             audioPlayer = player
 
             audioDuration = player.duration
             playheadTime = 0
             selectedAudioFileName = url.lastPathComponent
+            selectedCueID = nil
             firedCueIDs.removeAll()
             statusText = "Loaded \(selectedAudioFileName)"
+            fitZoom()
 
             Task.detached(priority: .userInitiated) {
                 let samples = (try? Self.extractWaveform(url: url, targetSampleCount: 2400)) ?? []
@@ -116,22 +175,53 @@ final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate 
         playheadTime = 0
         firedCueIDs.removeAll()
         stopPlayheadTimer()
+        statusText = "Stopped"
     }
 
-    func clearCues() {
-        cues.removeAll()
-        firedCueIDs.removeAll()
-        statusText = "Cleared cues for \(hardcodedLaneName)"
+    func clearCues(for laneID: String) {
+        cues.removeAll { $0.laneID == laneID }
+        if let selectedCueID, cues.contains(where: { $0.id == selectedCueID }) == false {
+            self.selectedCueID = nil
+        }
+        firedCueIDs = firedCueIDs.intersection(Set(cues.map(\.id)))
+        statusText = "Cleared cues for \(laneName(for: laneID))"
     }
 
-    func placeCue(at normalizedPosition: CGFloat) {
-        guard hasAudio else { return }
-        let unclamped = Double(normalizedPosition) * audioDuration
-        let snappedTime = snapToQuarterNote(unclamped)
-        let cue = TimelineCue(time: snappedTime, label: "Cue \(cues.count + 1)")
-        cues.append(cue)
-        cues.sort { $0.time < $1.time }
-        statusText = "Placed \(cue.label) at \(barBeatString(for: snappedTime))"
+    func selectCue(_ cueID: UUID?) {
+        selectedCueID = cueID
+    }
+
+    func deleteSelectedCue() {
+        guard let selectedCueID else { return }
+        let hadCue = cues.contains { $0.id == selectedCueID }
+        cues.removeAll { $0.id == selectedCueID }
+        if hadCue {
+            firedCueIDs.remove(selectedCueID)
+            self.selectedCueID = nil
+            statusText = "Deleted selected cue"
+        }
+    }
+
+    func handleLaneTap(laneID: String, xPosition: CGFloat, laneWidth: CGFloat) {
+        guard hasAudio else {
+            statusText = "Load audio first to place cues."
+            return
+        }
+        guard laneWidth > 0 else { return }
+
+        let normalized = max(0, min(1, xPosition / laneWidth))
+        let tapTime = Double(normalized) * audioDuration
+        let timeTolerance = Double(12 / laneWidth) * audioDuration
+
+        if let nearbyCue = cues(for: laneID).min(by: {
+            abs($0.time - tapTime) < abs($1.time - tapTime)
+        }), abs(nearbyCue.time - tapTime) <= timeTolerance {
+            selectedCueID = nearbyCue.id
+            statusText = "Selected \(nearbyCue.label) at \(barBeatString(for: nearbyCue.time))"
+            return
+        }
+
+        placeCue(in: laneID, at: normalized)
     }
 
     func xPosition(for time: Double, width: CGFloat) -> CGFloat {
@@ -146,10 +236,28 @@ final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate 
         return "Bar \(bar) Beat \(beat)"
     }
 
+    func songProgressDetail() -> String {
+        "\(formatClock(playheadTime)) / \(formatClock(audioDuration))"
+    }
+
+    private func laneName(for laneID: String) -> String {
+        lanes.first(where: { $0.id == laneID })?.name ?? "Unknown Lane"
+    }
+
+    private func placeCue(in laneID: String, at normalizedPosition: CGFloat) {
+        let unclamped = Double(normalizedPosition) * audioDuration
+        let snappedTime = snapToQuarterNote(unclamped)
+        let cue = TimelineCue(laneID: laneID, time: snappedTime)
+        cues.append(cue)
+        cues.sort { $0.time < $1.time }
+        selectedCueID = cue.id
+        statusText = "Placed \(cue.label) at \(barBeatString(for: snappedTime))"
+    }
+
     private func startPlayheadTimer() {
         stopPlayheadTimer()
         playheadTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
+            guard self != nil else { return }
             Task { @MainActor [weak self] in
                 self?.updatePlayhead()
             }
@@ -183,19 +291,21 @@ final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
         for cue in cues where cue.time >= startTime && cue.time < endTime {
             guard !firedCueIDs.contains(cue.id) else { continue }
+            guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { continue }
             firedCueIDs.insert(cue.id)
 
             nexusClient.sendIntent(
-                targets: [hardcodedLaneTarget],
+                targets: [lane.target],
                 action: "glitchboard.cue.trigger",
                 params: [
                     "cue_id": cue.id.uuidString,
                     "label": cue.label,
+                    "lane": lane.name,
                     "bar_beat": barBeatString(for: cue.time)
                 ]
             )
 
-            statusText = "Fired \(cue.label) on \(hardcodedLaneName)"
+            statusText = "Fired \(cue.label) on \(lane.name)"
         }
     }
 
@@ -203,6 +313,13 @@ final class GlitchBoardState: NSObject, ObservableObject, AVAudioPlayerDelegate 
         let snappedBeatIndex = (time / beatDuration).rounded()
         let snappedTime = snappedBeatIndex * beatDuration
         return min(max(0, snappedTime), audioDuration)
+    }
+
+    private func formatClock(_ time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "00:00.0" }
+        let minutes = Int(time / 60)
+        let seconds = time - Double(minutes * 60)
+        return String(format: "%02d:%04.1f", minutes, seconds)
     }
 
     nonisolated private static func extractWaveform(url: URL, targetSampleCount: Int) throws -> [Float] {
