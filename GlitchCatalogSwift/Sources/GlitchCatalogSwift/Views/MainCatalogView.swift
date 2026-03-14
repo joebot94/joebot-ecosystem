@@ -1,5 +1,6 @@
 import JoebotSDK
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum CatalogThemePreset: String, CaseIterable, Identifiable {
     case dos
@@ -128,6 +129,12 @@ struct MainCatalogView: View {
     @State private var showingNewSessionSheet = false
     @State private var showingEditSessionSheet = false
     @State private var showingDeleteSessionAlert = false
+    @State private var showingAddTapeSheet = false
+    @State private var showingEditTapeSheet = false
+    @State private var showingAddGearSheet = false
+    @State private var showingEditGearSheet = false
+    @State private var showingMediaImporter = false
+    @State private var showingEditMediaSheet = false
 
     private var theme: CatalogTheme { preset.theme }
 
@@ -252,6 +259,88 @@ struct MainCatalogView: View {
                     .frame(width: 420, height: 220)
             }
         }
+        .sheet(isPresented: $showingAddTapeSheet) {
+            TapeEditorSheet(
+                mode: .new,
+                initialTapeID: "",
+                initialFormat: "VHS",
+                initialLabel: "",
+                initialStorageLocation: "",
+                initialNotes: "",
+                onSave: { tapeID, format, label, storageLocation, notes in
+                    state.addTape(
+                        tapeID: tapeID,
+                        format: format,
+                        label: label,
+                        storageLocation: storageLocation,
+                        notes: notes
+                    )
+                }
+            )
+        }
+        .sheet(isPresented: $showingEditTapeSheet) {
+            if let selected = state.selectedTape {
+                TapeEditorSheet(
+                    mode: .edit,
+                    initialTapeID: selected.tapeID,
+                    initialFormat: selected.format,
+                    initialLabel: selected.label,
+                    initialStorageLocation: selected.storageLocation,
+                    initialNotes: selected.notes,
+                    onSave: { tapeID, format, label, storageLocation, notes in
+                        state.updateSelectedTape(
+                            tapeID: tapeID,
+                            format: format,
+                            label: label,
+                            storageLocation: storageLocation,
+                            notes: notes
+                        )
+                    }
+                )
+            } else {
+                Text("No tape selected")
+                    .frame(width: 420, height: 220)
+            }
+        }
+        .sheet(isPresented: $showingAddGearSheet) {
+            GearEditorSheet(
+                mode: .new,
+                initialName: "",
+                initialNotes: "",
+                onSave: { name, notes in
+                    state.addGearToSession(name: name, notes: notes)
+                }
+            )
+        }
+        .sheet(isPresented: $showingEditGearSheet) {
+            if let selected = state.selectedGearRow {
+                GearEditorSheet(
+                    mode: .edit,
+                    initialName: selected.gear.name,
+                    initialNotes: selected.link.notes,
+                    onSave: { name, notes in
+                        state.updateSelectedGear(name: name, notes: notes)
+                    }
+                )
+            } else {
+                Text("No gear selected")
+                    .frame(width: 420, height: 220)
+            }
+        }
+        .sheet(isPresented: $showingEditMediaSheet) {
+            if let selected = state.selectedMedia {
+                MediaMetadataSheet(
+                    initialKind: selected.kind,
+                    initialNotes: selected.notes,
+                    onSave: { kind, notes in
+                        state.updateSelectedMedia(kind: kind, notes: notes)
+                    }
+                )
+            } else {
+                Text("No media selected")
+                    .frame(width: 420, height: 220)
+            }
+        }
         .sheet(item: Binding(
             get: { state.pendingSnapshotDraft },
             set: { state.pendingSnapshotDraft = $0 }
@@ -273,6 +362,18 @@ struct MainCatalogView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes the selected .jbt session file.")
+        }
+        .fileImporter(
+            isPresented: $showingMediaImporter,
+            allowedContentTypes: [.movie, .image, .data],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case let .success(urls):
+                state.addMediaFiles(urls: urls)
+            case .failure:
+                state.selectMedia(nil)
+            }
         }
         .onChange(of: kindOptions) { _, next in
             if !next.contains(selectedKindFilter) {
@@ -530,11 +631,26 @@ struct MainCatalogView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(state.tapesForSelectedSession, id: \.id) { tape in
-                            Text("\(tape.tapeID) [\(tape.format)]  \(tape.label)")
+                            Button {
+                                state.selectTape(tape.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(tape.tapeID) [\(tape.format)]  \(tape.label)")
+                                        .lineLimit(1)
+                                    if !tape.storageLocation.isEmpty {
+                                        Text(tape.storageLocation)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.muted)
+                                            .lineLimit(1)
+                                    }
+                                }
                                 .font(.system(size: 12, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
+                                .background(state.selectedTapeID == tape.id ? theme.selection : theme.panelInner)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(2)
@@ -543,12 +659,21 @@ struct MainCatalogView: View {
                 .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
 
                 HStack(spacing: 6) {
-                    Button("Add Tape") {}
+                    Button("Add Tape") {
+                        showingAddTapeSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Edit Selected") {}
+                        .disabled(state.selectedSession == nil)
+                    Button("Edit Selected") {
+                        showingEditTapeSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Delete Selected") {}
+                        .disabled(state.selectedTape == nil)
+                    Button("Delete Selected") {
+                        state.deleteSelectedTape()
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
+                        .disabled(state.selectedTape == nil)
                 }
             }
         }
@@ -559,12 +684,26 @@ struct MainCatalogView: View {
             VStack(spacing: 6) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(state.gearChainForSelectedSession.enumerated()), id: \.offset) { idx, item in
-                            Text("\(idx + 1). \(item)")
+                        ForEach(Array(state.gearRowsForSelectedSession.enumerated()), id: \.element.id) { idx, row in
+                            Button {
+                                state.selectGearLink(row.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(idx + 1). \(row.gear.name)")
+                                    if !row.link.notes.isEmpty {
+                                        Text(row.link.notes)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.muted)
+                                            .lineLimit(1)
+                                    }
+                                }
                                 .font(.system(size: 12, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
+                                .background(state.selectedGearLinkID == row.id ? theme.selection : theme.panelInner)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(2)
@@ -573,12 +712,21 @@ struct MainCatalogView: View {
                 .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
 
                 HStack(spacing: 6) {
-                    Button("Add Gear...") {}
+                    Button("Add Gear...") {
+                        showingAddGearSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Edit Gear...") {}
+                        .disabled(state.selectedSession == nil)
+                    Button("Edit Gear...") {
+                        showingEditGearSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Remove From Session") {}
+                        .disabled(state.selectedGearRow == nil)
+                    Button("Remove From Session") {
+                        state.removeSelectedGearFromSession()
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
+                        .disabled(state.selectedGearRow == nil)
                 }
             }
         }
@@ -605,12 +753,26 @@ struct MainCatalogView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(filteredMedia) { item in
-                            Text("\(item.kind): \(item.filePath)")
+                            Button {
+                                state.selectMedia(item.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(item.kind): \(item.filePath)")
+                                        .lineLimit(1)
+                                    if !item.notes.isEmpty {
+                                        Text(item.notes)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.muted)
+                                            .lineLimit(1)
+                                    }
+                                }
                                 .font(.system(size: 12, design: .monospaced))
-                                .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
+                                .background(state.selectedMediaID == item.id ? theme.selection : theme.panelInner)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(2)
@@ -619,14 +781,26 @@ struct MainCatalogView: View {
                 .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
 
                 HStack(spacing: 6) {
-                    Button("Add Media Files...") {}
+                    Button("Add Media Files...") {
+                        showingMediaImporter = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Edit Metadata...") {}
+                        .disabled(state.selectedSession == nil)
+                    Button("Edit Metadata...") {
+                        showingEditMediaSheet = true
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Open Selected") {}
+                        .disabled(state.selectedMedia == nil)
+                    Button("Open Selected") {
+                        state.openSelectedMedia()
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
-                    Button("Delete Selected") {}
+                        .disabled(state.selectedMedia == nil)
+                    Button("Delete Selected") {
+                        state.deleteSelectedMedia()
+                    }
                         .buttonStyle(RetroButtonStyle(theme: theme))
+                        .disabled(state.selectedMedia == nil)
                     Button("Grid View") {}
                         .buttonStyle(RetroButtonStyle(theme: theme))
                 }
@@ -710,6 +884,202 @@ private struct SessionEditorSheet: View {
         }
         .padding(16)
         .frame(minWidth: 420, minHeight: 280)
+    }
+}
+
+private enum TapeEditorMode {
+    case new
+    case edit
+
+    var title: String {
+        switch self {
+        case .new:
+            return "Add Tape"
+        case .edit:
+            return "Edit Tape"
+        }
+    }
+
+    var actionLabel: String {
+        switch self {
+        case .new:
+            return "Add"
+        case .edit:
+            return "Save"
+        }
+    }
+}
+
+private struct TapeEditorSheet: View {
+    let mode: TapeEditorMode
+    let onSave: (String, String, String, String, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var tapeID: String
+    @State private var format: String
+    @State private var label: String
+    @State private var storageLocation: String
+    @State private var notes: String
+
+    init(
+        mode: TapeEditorMode,
+        initialTapeID: String,
+        initialFormat: String,
+        initialLabel: String,
+        initialStorageLocation: String,
+        initialNotes: String,
+        onSave: @escaping (String, String, String, String, String) -> Void
+    ) {
+        self.mode = mode
+        self.onSave = onSave
+        _tapeID = State(initialValue: initialTapeID)
+        _format = State(initialValue: initialFormat)
+        _label = State(initialValue: initialLabel)
+        _storageLocation = State(initialValue: initialStorageLocation)
+        _notes = State(initialValue: initialNotes)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(mode.title)
+                .font(.headline)
+
+            TextField("Tape ID", text: $tapeID)
+            TextField("Format", text: $format)
+            TextField("Label", text: $label)
+            TextField("Storage Location", text: $storageLocation)
+            TextField("Notes", text: $notes, axis: .vertical)
+                .lineLimit(3 ... 8)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(mode.actionLabel) {
+                    onSave(
+                        tapeID.trimmingCharacters(in: .whitespacesAndNewlines),
+                        format.trimmingCharacters(in: .whitespacesAndNewlines),
+                        label.trimmingCharacters(in: .whitespacesAndNewlines),
+                        storageLocation.trimmingCharacters(in: .whitespacesAndNewlines),
+                        notes
+                    )
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(format.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 420, minHeight: 320)
+    }
+}
+
+private enum GearEditorMode {
+    case new
+    case edit
+
+    var title: String {
+        switch self {
+        case .new:
+            return "Add Gear"
+        case .edit:
+            return "Edit Gear"
+        }
+    }
+
+    var actionLabel: String {
+        switch self {
+        case .new:
+            return "Add"
+        case .edit:
+            return "Save"
+        }
+    }
+}
+
+private struct GearEditorSheet: View {
+    let mode: GearEditorMode
+    let onSave: (String, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var notes: String
+
+    init(
+        mode: GearEditorMode,
+        initialName: String,
+        initialNotes: String,
+        onSave: @escaping (String, String) -> Void
+    ) {
+        self.mode = mode
+        self.onSave = onSave
+        _name = State(initialValue: initialName)
+        _notes = State(initialValue: initialNotes)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(mode.title)
+                .font(.headline)
+
+            TextField("Gear Name", text: $name)
+            TextField("Notes", text: $notes, axis: .vertical)
+                .lineLimit(3 ... 8)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(mode.actionLabel) {
+                    onSave(name.trimmingCharacters(in: .whitespacesAndNewlines), notes)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 420, minHeight: 260)
+    }
+}
+
+private struct MediaMetadataSheet: View {
+    let onSave: (String, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var kind: String
+    @State private var notes: String
+
+    init(
+        initialKind: String,
+        initialNotes: String,
+        onSave: @escaping (String, String) -> Void
+    ) {
+        self.onSave = onSave
+        _kind = State(initialValue: initialKind)
+        _notes = State(initialValue: initialNotes)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Edit Media Metadata")
+                .font(.headline)
+
+            TextField("Kind (video/image/script/reference)", text: $kind)
+            TextField("Notes", text: $notes, axis: .vertical)
+                .lineLimit(3 ... 8)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    onSave(kind.trimmingCharacters(in: .whitespacesAndNewlines), notes)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(kind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 420, minHeight: 260)
     }
 }
 

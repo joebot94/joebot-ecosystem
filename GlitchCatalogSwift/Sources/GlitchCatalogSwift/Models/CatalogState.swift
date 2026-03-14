@@ -1,12 +1,19 @@
 import Combine
 import Foundation
 import JoebotSDK
+import AppKit
 
 struct PendingSnapshotDraft: Identifiable {
     let id: String
     let createdAtISO: String
     let defaultName: String
     let snapshot: [String: Any]
+}
+
+struct GearChainRow: Identifiable, Hashable {
+    var id: UUID { link.id }
+    let link: SessionGearRecord
+    let gear: GearRecord
 }
 
 @MainActor
@@ -21,6 +28,9 @@ final class CatalogState: ObservableObject {
 
     @Published var selectedSessionID: UUID?
     @Published var selectedPresetID: String?
+    @Published var selectedTapeID: String?
+    @Published var selectedGearLinkID: UUID?
+    @Published var selectedMediaID: UUID?
 
     @Published var pendingSnapshotDraft: PendingSnapshotDraft?
     @Published var isSnapshotInFlight = false
@@ -83,6 +93,21 @@ final class CatalogState: ObservableObject {
         return presets.first(where: { $0.id == selectedPresetID })
     }
 
+    var selectedTape: TapeRecord? {
+        guard let selectedTapeID else { return nil }
+        return tapes.first(where: { $0.id == selectedTapeID })
+    }
+
+    var selectedGearRow: GearChainRow? {
+        guard let selectedGearLinkID else { return nil }
+        return gearRowsForSelectedSession.first(where: { $0.id == selectedGearLinkID })
+    }
+
+    var selectedMedia: MediaRecord? {
+        guard let selectedMediaID else { return nil }
+        return media.first(where: { $0.id == selectedMediaID })
+    }
+
     var tapesForSelectedSession: [TapeRecord] {
         tapes
     }
@@ -92,9 +117,13 @@ final class CatalogState: ObservableObject {
     }
 
     var gearChainForSelectedSession: [String] {
-        let linkedGearIDs = sessionGear.map(\.gearID)
-        return linkedGearIDs.compactMap { gearID in
-            gear.first(where: { $0.id == gearID })?.name
+        gearRowsForSelectedSession.map(\.gear.name)
+    }
+
+    var gearRowsForSelectedSession: [GearChainRow] {
+        sessionGear.compactMap { link in
+            guard let linked = gear.first(where: { $0.id == link.gearID }) else { return nil }
+            return GearChainRow(link: link, gear: linked)
         }
     }
 
@@ -109,6 +138,9 @@ final class CatalogState: ObservableObject {
             presets = []
             eventLog = nil
             selectedPresetID = nil
+            selectedTapeID = nil
+            selectedGearLinkID = nil
+            selectedMediaID = nil
             return
         }
 
@@ -124,10 +156,37 @@ final class CatalogState: ObservableObject {
         } else {
             self.selectedPresetID = nil
         }
+        if let selectedTapeID, tapes.contains(where: { $0.id == selectedTapeID }) {
+            self.selectedTapeID = selectedTapeID
+        } else {
+            self.selectedTapeID = nil
+        }
+        if let selectedGearLinkID, sessionGear.contains(where: { $0.id == selectedGearLinkID }) {
+            self.selectedGearLinkID = selectedGearLinkID
+        } else {
+            self.selectedGearLinkID = nil
+        }
+        if let selectedMediaID, media.contains(where: { $0.id == selectedMediaID }) {
+            self.selectedMediaID = selectedMediaID
+        } else {
+            self.selectedMediaID = nil
+        }
     }
 
     func selectPreset(_ presetID: String?) {
         selectedPresetID = presetID
+    }
+
+    func selectTape(_ tapeID: String?) {
+        selectedTapeID = tapeID
+    }
+
+    func selectGearLink(_ gearLinkID: UUID?) {
+        selectedGearLinkID = gearLinkID
+    }
+
+    func selectMedia(_ mediaID: UUID?) {
+        selectedMediaID = mediaID
     }
 
     func createSession(title: String, date: String, location: String, notes: String) {
@@ -181,6 +240,199 @@ final class CatalogState: ObservableObject {
             .id
 
         refreshSessionIndex(selecting: nextSelection)
+    }
+
+    func addTape(tapeID: String, format: String, label: String, storageLocation: String, notes: String) {
+        guard let selectedSessionID else {
+            showToast("Select a session first")
+            return
+        }
+
+        let normalizedTapeID = tapeID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "T-\(String(format: "%03d", tapes.count + 1))"
+            : tapeID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        updateSelectedDocument { document in
+            document.tapes.append(
+                TapeRecord(
+                    sessionID: selectedSessionID,
+                    tapeID: normalizedTapeID,
+                    format: format.trimmingCharacters(in: .whitespacesAndNewlines),
+                    label: label.trimmingCharacters(in: .whitespacesAndNewlines),
+                    storageLocation: storageLocation.trimmingCharacters(in: .whitespacesAndNewlines),
+                    notes: notes
+                )
+            )
+        }
+
+        selectedTapeID = normalizedTapeID
+        showToast("Tape added")
+    }
+
+    func updateSelectedTape(tapeID: String, format: String, label: String, storageLocation: String, notes: String) {
+        guard let selectedTapeID else { return }
+        let normalizedTapeID = tapeID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? selectedTapeID : tapeID
+
+        updateSelectedDocument { document in
+            guard let index = document.tapes.firstIndex(where: { $0.id == selectedTapeID }) else { return }
+            document.tapes[index].tapeID = normalizedTapeID
+            document.tapes[index].format = format.trimmingCharacters(in: .whitespacesAndNewlines)
+            document.tapes[index].label = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            document.tapes[index].storageLocation = storageLocation.trimmingCharacters(in: .whitespacesAndNewlines)
+            document.tapes[index].notes = notes
+        }
+
+        self.selectedTapeID = normalizedTapeID
+        showToast("Tape updated")
+    }
+
+    func deleteSelectedTape() {
+        guard let selectedTapeID else { return }
+
+        updateSelectedDocument { document in
+            document.tapes.removeAll { $0.id == selectedTapeID }
+        }
+
+        self.selectedTapeID = nil
+        showToast("Tape deleted")
+    }
+
+    func addGearToSession(name: String, notes: String) {
+        guard let selectedSessionID else {
+            showToast("Select a session first")
+            return
+        }
+
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
+        let gearRecord = GearRecord(id: UUID(), name: trimmedName)
+        let link = SessionGearRecord(
+            id: UUID(),
+            sessionID: selectedSessionID,
+            gearID: gearRecord.id,
+            notes: notes
+        )
+
+        updateSelectedDocument { document in
+            document.gear.append(gearRecord)
+            document.sessionGear.append(link)
+        }
+
+        selectedGearLinkID = link.id
+        showToast("Gear added")
+    }
+
+    func updateSelectedGear(name: String, notes: String) {
+        guard let selectedGearLinkID else { return }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
+        updateSelectedDocument { document in
+            guard let linkIndex = document.sessionGear.firstIndex(where: { $0.id == selectedGearLinkID }) else { return }
+            let gearID = document.sessionGear[linkIndex].gearID
+            if let gearIndex = document.gear.firstIndex(where: { $0.id == gearID }) {
+                document.gear[gearIndex].name = trimmedName
+            }
+            document.sessionGear[linkIndex].notes = notes
+        }
+
+        showToast("Gear updated")
+    }
+
+    func removeSelectedGearFromSession() {
+        guard let selectedGearLinkID else { return }
+
+        updateSelectedDocument { document in
+            document.sessionGear.removeAll { $0.id == selectedGearLinkID }
+            let remainingGearIDs = Set(document.sessionGear.map(\.gearID))
+            document.gear.removeAll { !remainingGearIDs.contains($0.id) }
+        }
+
+        self.selectedGearLinkID = nil
+        showToast("Gear removed")
+    }
+
+    func addMediaFiles(urls: [URL]) {
+        guard let selectedSessionID else {
+            showToast("Select a session first")
+            return
+        }
+        guard !urls.isEmpty else { return }
+
+        var newestMediaID: UUID?
+        updateSelectedDocument { document in
+            for url in urls {
+                let didAccess = url.startAccessingSecurityScopedResource()
+                defer {
+                    if didAccess {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+
+                let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey, .nameKey, .isDirectoryKey])
+                if values?.isDirectory == true {
+                    continue
+                }
+
+                let fileName = values?.name ?? url.lastPathComponent
+                let createdAt = values?.creationDate ?? Date()
+                let fileSize = values?.fileSize
+                let kind = inferMediaKind(from: url.pathExtension)
+                let noteSuffix = fileSize.map { "size=\($0) bytes" } ?? "size=unknown"
+
+                let record = MediaRecord(
+                    id: UUID(),
+                    sessionID: selectedSessionID,
+                    filePath: url.path,
+                    kind: kind,
+                    checksum: "",
+                    duration: 0,
+                    width: 0,
+                    height: 0,
+                    codec: "",
+                    createdAt: ISO8601DateFormatter().string(from: createdAt),
+                    notes: "\(fileName) | \(noteSuffix)",
+                    thumbnailPath: ""
+                )
+                newestMediaID = record.id
+                document.media.append(record)
+            }
+        }
+
+        if let newestMediaID {
+            selectedMediaID = newestMediaID
+            showToast("Added \(urls.count) media file(s)")
+        }
+    }
+
+    func updateSelectedMedia(kind: String, notes: String) {
+        guard let selectedMediaID else { return }
+
+        updateSelectedDocument { document in
+            guard let index = document.media.firstIndex(where: { $0.id == selectedMediaID }) else { return }
+            document.media[index].kind = kind.trimmingCharacters(in: .whitespacesAndNewlines)
+            document.media[index].notes = notes
+        }
+
+        showToast("Media updated")
+    }
+
+    func deleteSelectedMedia() {
+        guard let selectedMediaID else { return }
+
+        updateSelectedDocument { document in
+            document.media.removeAll { $0.id == selectedMediaID }
+        }
+
+        self.selectedMediaID = nil
+        showToast("Media removed")
+    }
+
+    func openSelectedMedia() {
+        guard let selectedMedia else { return }
+        let fileURL = URL(fileURLWithPath: selectedMedia.filePath)
+        NSWorkspace.shared.open(fileURL)
     }
 
     func sendSnapshot() {
@@ -476,5 +728,27 @@ final class CatalogState: ObservableObject {
             "preset_count": presets.count,
             "is_recording": isRecordingCurrentSession,
         ]
+    }
+
+    private func updateSelectedDocument(_ mutate: (inout SessionDocument) -> Void) {
+        guard let selectedSessionID, var document = documentsBySessionID[selectedSessionID] else { return }
+        mutate(&document)
+        documentsBySessionID[selectedSessionID] = document
+        store.saveSessionDocument(document)
+        refreshSessionIndex(selecting: selectedSessionID)
+    }
+
+    private func inferMediaKind(from extensionValue: String) -> String {
+        let ext = extensionValue.lowercased()
+        if ["mov", "mp4", "m4v", "avi", "mkv", "webm"].contains(ext) {
+            return "video"
+        }
+        if ["jpg", "jpeg", "png", "bmp", "gif", "tiff", "webp", "heic"].contains(ext) {
+            return "image"
+        }
+        if ["py", "js", "sh", "swift", "txt", "md", "json"].contains(ext) {
+            return "script"
+        }
+        return "reference"
     }
 }
