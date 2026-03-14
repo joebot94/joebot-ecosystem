@@ -173,6 +173,16 @@ struct GlitchBoardMainView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
 
+            Divider()
+                .frame(height: 16)
+
+            Text("Label:")
+                .foregroundStyle(.secondary)
+            TextField("Cue", text: selectedCueLabelBinding)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+                .disabled(state.selectedCue == nil)
+
             Spacer()
 
             Text(state.songProgressDetail())
@@ -190,6 +200,13 @@ struct GlitchBoardMainView: View {
         .padding(10)
         .background(GlitchBoardTheme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var selectedCueLabelBinding: Binding<String> {
+        Binding(
+            get: { state.selectedCueLabelDraft },
+            set: { state.updateSelectedCueLabel($0) }
+        )
     }
 }
 
@@ -414,12 +431,13 @@ private struct CueLaneRowView: View {
                     Circle()
                         .stroke(Color.white.opacity(isSelected ? 0.95 : 0), lineWidth: 1.3)
                 )
-            Text("Cue")
+            Text(cue.label)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.9))
                 .padding(.horizontal, 4)
                 .background(Color.black.opacity(0.35))
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .lineLimit(1)
         }
         .position(x: min(max(8, x), max(8, width - 8)), y: 30)
         .help("\(cue.label) • \(state.barBeatString(for: cue.time))")

@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 import JoebotSDK
 
@@ -10,15 +11,37 @@ final class GlitchBoardState: NSObject, ObservableObject {
     @Published var waveform: [Float] = []
     @Published var cues: [TimelineCue] = []
     @Published var selectedCueID: UUID?
+    @Published var selectedCueLabelDraft = ""
     @Published var selectedAudioFileName = "No audio loaded"
     @Published var statusText = "Load a song to start building cues."
     @Published var isPlaying = false
     @Published var zoomScale: CGFloat = 1
     @Published var timelineViewportWidth: CGFloat = 1
     @Published var lanes: [CueLane] = [
-        CueLane(id: "lane.dirty_mixer", name: "Dirty Mixer", target: "device.dirty_mixer.1", status: .online, accentHex: "#FF6600"),
-        CueLane(id: "lane.mtpx_1", name: "MTPX Plus #1", target: "device.mtpx.1", status: .offline, accentHex: "#00FFFF"),
-        CueLane(id: "lane.atlas_1", name: "Atlas", target: "device.atlas.1", status: .connecting, accentHex: "#00FF88")
+        CueLane(
+            id: "lane.dirty_mixer",
+            name: "Dirty Mixer",
+            target: "device.dirty_mixer.1",
+            status: .offline,
+            accentHex: "#FF6600",
+            discoveryHints: ["dirtymixer", "dirty_mixer"]
+        ),
+        CueLane(
+            id: "lane.mtpx_1",
+            name: "MTPX Plus #1",
+            target: "device.mtpx.1",
+            status: .offline,
+            accentHex: "#00FFFF",
+            discoveryHints: ["mtpx", "mtpx_plus"]
+        ),
+        CueLane(
+            id: "lane.atlas_1",
+            name: "Atlas",
+            target: "device.atlas.1",
+            status: .offline,
+            accentHex: "#00FF88",
+            discoveryHints: ["atlas", "extron"]
+        )
     ]
 
     let nexusClient: NexusClient
@@ -26,6 +49,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var playheadTimer: Timer?
     private var firedCueIDs: Set<UUID> = []
+    private var subscriptions: Set<AnyCancellable> = []
 
     override init() {
         nexusClient = NexusClient(clientId: "glitchboard_v1", clientType: "daw")
@@ -52,6 +76,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 "lane_count": self.lanes.count
             ]
         }
+
+        wireNexusObservers()
+        refreshLaneStatusesFromNexus()
     }
 
     var beatDuration: Double {
@@ -120,7 +147,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             audioDuration = player.duration
             playheadTime = 0
             selectedAudioFileName = url.lastPathComponent
-            selectedCueID = nil
+            selectCue(nil)
             firedCueIDs.removeAll()
             statusText = "Loaded \(selectedAudioFileName)"
             fitZoom()
@@ -181,7 +208,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     func clearCues(for laneID: String) {
         cues.removeAll { $0.laneID == laneID }
         if let selectedCueID, cues.contains(where: { $0.id == selectedCueID }) == false {
-            self.selectedCueID = nil
+            selectCue(nil)
         }
         firedCueIDs = firedCueIDs.intersection(Set(cues.map(\.id)))
         statusText = "Cleared cues for \(laneName(for: laneID))"
@@ -189,6 +216,18 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     func selectCue(_ cueID: UUID?) {
         selectedCueID = cueID
+        if let cueID, let cue = cues.first(where: { $0.id == cueID }) {
+            selectedCueLabelDraft = cue.label
+        } else {
+            selectedCueLabelDraft = ""
+        }
+    }
+
+    func updateSelectedCueLabel(_ newLabel: String) {
+        selectedCueLabelDraft = newLabel
+        guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
+        let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        cues[index].label = trimmed.isEmpty ? "Cue" : trimmed
     }
 
     func deleteSelectedCue() {
@@ -197,7 +236,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
         cues.removeAll { $0.id == selectedCueID }
         if hadCue {
             firedCueIDs.remove(selectedCueID)
-            self.selectedCueID = nil
+            selectCue(nil)
             statusText = "Deleted selected cue"
         }
     }
@@ -216,7 +255,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
         if let nearbyCue = cues(for: laneID).min(by: {
             abs($0.time - tapTime) < abs($1.time - tapTime)
         }), abs(nearbyCue.time - tapTime) <= timeTolerance {
-            selectedCueID = nearbyCue.id
+            selectCue(nearbyCue.id)
             statusText = "Selected \(nearbyCue.label) at \(barBeatString(for: nearbyCue.time))"
             return
         }
@@ -250,8 +289,48 @@ final class GlitchBoardState: NSObject, ObservableObject {
         let cue = TimelineCue(laneID: laneID, time: snappedTime)
         cues.append(cue)
         cues.sort { $0.time < $1.time }
-        selectedCueID = cue.id
+        selectCue(cue.id)
         statusText = "Placed \(cue.label) at \(barBeatString(for: snappedTime))"
+    }
+
+    private func wireNexusObservers() {
+        nexusClient.$isConnected
+            .combineLatest(nexusClient.$isConnecting, nexusClient.$connectedClients)
+            .sink { [weak self] _, _, _ in
+                self?.refreshLaneStatusesFromNexus()
+            }
+            .store(in: &subscriptions)
+    }
+
+    private func refreshLaneStatusesFromNexus() {
+        let connectedClients = nexusClient.connectedClients
+        for index in lanes.indices {
+            let lane = lanes[index]
+            lanes[index].status = resolvedLaneStatus(for: lane, connectedClients: connectedClients)
+        }
+    }
+
+    private func resolvedLaneStatus(for lane: CueLane, connectedClients: [NexusClientInfo]) -> LaneConnectionState {
+        if nexusClient.isConnecting {
+            return .connecting
+        }
+        guard nexusClient.isConnected else {
+            return .offline
+        }
+
+        let matches = connectedClients.filter { info in
+            let clientID = info.clientId.lowercased()
+            let clientType = info.clientType.lowercased()
+            return lane.discoveryHints.contains(where: { hint in
+                clientID.contains(hint) || clientType.contains(hint)
+            })
+        }
+
+        guard !matches.isEmpty else {
+            return .offline
+        }
+
+        return matches.contains(where: \.online) ? .online : .offline
     }
 
     private func startPlayheadTimer() {
