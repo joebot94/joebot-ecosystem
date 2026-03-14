@@ -126,6 +126,7 @@ struct MainCatalogView: View {
     @State private var preset: CatalogThemePreset = .dos
     @State private var searchText: String = ""
     @State private var selectedKindFilter: String = "All kinds"
+    @State private var mediaGridView = false
     @State private var showingNewSessionSheet = false
     @State private var showingEditSessionSheet = false
     @State private var showingDeleteSessionAlert = false
@@ -148,6 +149,7 @@ struct MainCatalogView: View {
                 || session.location.lowercased().contains(query)
                 || session.date.lowercased().contains(query)
                 || session.notes.lowercased().contains(query)
+                || session.tags.joined(separator: " ").lowercased().contains(query)
         }
     }
 
@@ -161,6 +163,11 @@ struct MainCatalogView: View {
             return state.mediaForSelectedSession
         }
         return state.mediaForSelectedSession.filter { $0.kind == selectedKindFilter }
+    }
+
+    private var replayIsAvailable: Bool {
+        guard let log = state.eventLog else { return false }
+        return ReplayEngine.durationMs(from: log) > 0
     }
 
     var body: some View {
@@ -229,12 +236,14 @@ struct MainCatalogView: View {
                 initialDate: Date(),
                 initialLocation: "",
                 initialNotes: "",
-                onSave: { title, date, location, notes in
+                initialTags: [],
+                onSave: { title, date, location, notes, tags in
                     state.createSession(
                         title: title,
                         date: CatalogState.format(date: date),
                         location: location,
-                        notes: notes
+                        notes: notes,
+                        tags: tags
                     )
                 }
             )
@@ -247,12 +256,14 @@ struct MainCatalogView: View {
                     initialDate: CatalogState.parse(dateString: selected.date),
                     initialLocation: selected.location,
                     initialNotes: selected.notes,
-                    onSave: { title, date, location, notes in
+                    initialTags: selected.tags,
+                    onSave: { title, date, location, notes, tags in
                         state.updateSelectedSession(
                             title: title,
                             date: CatalogState.format(date: date),
                             location: location,
-                            notes: notes
+                            notes: notes,
+                            tags: tags
                         )
                     }
                 )
@@ -334,8 +345,15 @@ struct MainCatalogView: View {
                 MediaMetadataSheet(
                     initialKind: selected.kind,
                     initialNotes: selected.notes,
-                    onSave: { kind, notes in
-                        state.updateSelectedMedia(kind: kind, notes: notes)
+                    initialToolPath: selected.toolPath,
+                    initialSettingsNotes: selected.settingsNotes,
+                    onSave: { kind, notes, toolPath, settingsNotes in
+                        state.updateSelectedMedia(
+                            kind: kind,
+                            notes: notes,
+                            toolPath: toolPath,
+                            settingsNotes: settingsNotes
+                        )
                     }
                 )
             } else {
@@ -344,11 +362,19 @@ struct MainCatalogView: View {
             }
         }
         .sheet(isPresented: $showingReplaySheet) {
-            if let session = state.selectedSession, let log = state.eventLog {
+            if let session = state.selectedSession, let log = state.eventLog, ReplayEngine.durationMs(from: log) > 0 {
                 ReplaySessionSheet(state: state, session: session, eventLog: log, theme: theme)
             } else {
-                Text("No event log available for replay")
-                    .frame(width: 540, height: 280)
+                VStack(spacing: 10) {
+                    Text("No timeline data")
+                        .font(.system(size: 16, weight: .bold, design: .monospaced))
+                    Text("This session has no replayable duration yet. Start recording during your next session to enable replay.")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(theme.muted)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                }
+                .frame(width: 560, height: 220)
             }
         }
         .sheet(item: Binding(
@@ -453,7 +479,7 @@ struct MainCatalogView: View {
                                 state.selectSession(session.id)
                             } label: {
                                 HStack(spacing: 6) {
-                                    Text("\(session.date) - \(session.title) [tags: ]")
+                                    Text("\(session.date) - \(session.title) [tags: \(sessionTagsText(session))]")
                                         .lineLimit(1)
                                     Spacer(minLength: 0)
                                 }
@@ -499,8 +525,8 @@ struct MainCatalogView: View {
                     showingReplaySheet = true
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
-                .disabled(state.selectedSession == nil || state.eventLog == nil)
-                .help(state.eventLog == nil
+                .disabled(state.selectedSession == nil || !replayIsAvailable)
+                .help(!replayIsAvailable
                     ? "No event log — start recording during your next session to enable replay"
                     : "Open session replay")
 
@@ -629,6 +655,13 @@ struct MainCatalogView: View {
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(theme.strongText)
                             .lineLimit(4)
+
+                        if let session = state.selectedSession {
+                            Text("Tags: \(sessionTagsText(session))")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(theme.muted)
+                                .lineLimit(1)
+                        }
 
                         if let eventLog = state.eventLog {
                             Divider()
@@ -799,38 +832,83 @@ struct MainCatalogView: View {
                     .labelsHidden()
                     .frame(width: 130)
 
+                    Button(mediaGridView ? "List View" : "Grid View") {
+                        mediaGridView.toggle()
+                    }
+                    .buttonStyle(RetroButtonStyle(theme: theme))
+                    .frame(width: 90)
+
                     Spacer()
                 }
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(filteredMedia) { item in
-                            Button {
-                                state.selectMedia(item.id)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(item.kind): \(item.filePath)")
-                                        .lineLimit(1)
-                                    if !item.notes.isEmpty {
-                                        Text(item.notes)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(theme.muted)
-                                            .lineLimit(1)
+                if mediaGridView {
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], spacing: 8) {
+                            ForEach(filteredMedia) { item in
+                                Button {
+                                    state.selectMedia(item.id)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(item.kind.uppercased())
+                                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(theme.accent)
+                                        Text(URL(fileURLWithPath: item.filePath).lastPathComponent)
+                                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                            .lineLimit(2)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        let details = mediaDetailsText(for: item)
+                                        if !details.isEmpty {
+                                            Text(details)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundStyle(theme.muted)
+                                                .lineLimit(2)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
                                     }
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+                                    .background(state.selectedMediaID == item.id ? theme.selection : theme.panelInner)
+                                    .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
                                 }
-                                .font(.system(size: 12, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(state.selectedMediaID == item.id ? theme.selection : theme.panelInner)
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
+                        .padding(2)
                     }
-                    .padding(2)
+                    .background(theme.panelInner)
+                    .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            ForEach(filteredMedia) { item in
+                                Button {
+                                    state.selectMedia(item.id)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(item.kind): \(item.filePath)")
+                                            .lineLimit(1)
+                                        if !item.notes.isEmpty {
+                                            Text(item.notes)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundStyle(theme.muted)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(state.selectedMediaID == item.id ? theme.selection : theme.panelInner)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(2)
+                    }
+                    .background(theme.panelInner)
+                    .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
                 }
-                .background(theme.panelInner)
-                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
 
                 HStack(spacing: 6) {
                     Button("Add Media Files...") {
@@ -853,11 +931,28 @@ struct MainCatalogView: View {
                     }
                         .buttonStyle(RetroButtonStyle(theme: theme))
                         .disabled(state.selectedMedia == nil)
-                    Button("Grid View") {}
-                        .buttonStyle(RetroButtonStyle(theme: theme))
                 }
             }
         }
+    }
+
+    private func sessionTagsText(_ session: SessionRecord) -> String {
+        guard !session.tags.isEmpty else { return "-" }
+        return session.tags.joined(separator: ", ")
+    }
+
+    private func mediaDetailsText(for item: MediaRecord) -> String {
+        var bits: [String] = []
+        if item.width > 0, item.height > 0 {
+            bits.append("\(item.width)x\(item.height)")
+        }
+        if item.duration > 0 {
+            bits.append(String(format: "%.1fs", item.duration))
+        }
+        if !item.codec.isEmpty {
+            bits.append(item.codec)
+        }
+        return bits.joined(separator: " • ")
     }
 }
 
@@ -886,13 +981,14 @@ private enum SessionEditorMode {
 
 private struct SessionEditorSheet: View {
     let mode: SessionEditorMode
-    let onSave: (String, Date, String, String) -> Void
+    let onSave: (String, Date, String, String, [String]) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
     @State private var date: Date
     @State private var location: String
     @State private var notes: String
+    @State private var tagsText: String
 
     init(
         mode: SessionEditorMode,
@@ -900,7 +996,8 @@ private struct SessionEditorSheet: View {
         initialDate: Date,
         initialLocation: String,
         initialNotes: String,
-        onSave: @escaping (String, Date, String, String) -> Void
+        initialTags: [String],
+        onSave: @escaping (String, Date, String, String, [String]) -> Void
     ) {
         self.mode = mode
         self.onSave = onSave
@@ -908,6 +1005,7 @@ private struct SessionEditorSheet: View {
         _date = State(initialValue: initialDate)
         _location = State(initialValue: initialLocation)
         _notes = State(initialValue: initialNotes)
+        _tagsText = State(initialValue: initialTags.joined(separator: ", "))
     }
 
     var body: some View {
@@ -918,6 +1016,7 @@ private struct SessionEditorSheet: View {
             TextField("Title", text: $title)
             DatePicker("Date", selection: $date, displayedComponents: [.date])
             TextField("Location", text: $location)
+            TextField("Tags (comma)", text: $tagsText)
             TextField("Notes", text: $notes, axis: .vertical)
                 .lineLimit(4 ... 8)
 
@@ -927,7 +1026,17 @@ private struct SessionEditorSheet: View {
                     dismiss()
                 }
                 Button(mode.actionLabel) {
-                    onSave(title.trimmingCharacters(in: .whitespacesAndNewlines), date, location, notes)
+                    let tags = tagsText
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    onSave(
+                        title.trimmingCharacters(in: .whitespacesAndNewlines),
+                        date,
+                        location,
+                        notes,
+                        tags
+                    )
                     dismiss()
                 }
                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -935,7 +1044,7 @@ private struct SessionEditorSheet: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 420, minHeight: 280)
+        .frame(minWidth: 420, minHeight: 320)
     }
 }
 
@@ -1094,20 +1203,26 @@ private struct GearEditorSheet: View {
 }
 
 private struct MediaMetadataSheet: View {
-    let onSave: (String, String) -> Void
+    let onSave: (String, String, String, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var kind: String
     @State private var notes: String
+    @State private var toolPath: String
+    @State private var settingsNotes: String
 
     init(
         initialKind: String,
         initialNotes: String,
-        onSave: @escaping (String, String) -> Void
+        initialToolPath: String,
+        initialSettingsNotes: String,
+        onSave: @escaping (String, String, String, String) -> Void
     ) {
         self.onSave = onSave
         _kind = State(initialValue: initialKind)
         _notes = State(initialValue: initialNotes)
+        _toolPath = State(initialValue: initialToolPath)
+        _settingsNotes = State(initialValue: initialSettingsNotes)
     }
 
     var body: some View {
@@ -1116,14 +1231,22 @@ private struct MediaMetadataSheet: View {
                 .font(.headline)
 
             TextField("Kind (video/image/script/reference)", text: $kind)
+            TextField("Tool Path", text: $toolPath)
             TextField("Notes", text: $notes, axis: .vertical)
+                .lineLimit(3 ... 8)
+            TextField("Settings Notes", text: $settingsNotes, axis: .vertical)
                 .lineLimit(3 ... 8)
 
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") {
-                    onSave(kind.trimmingCharacters(in: .whitespacesAndNewlines), notes)
+                    onSave(
+                        kind.trimmingCharacters(in: .whitespacesAndNewlines),
+                        notes,
+                        toolPath.trimmingCharacters(in: .whitespacesAndNewlines),
+                        settingsNotes
+                    )
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
@@ -1131,7 +1254,7 @@ private struct MediaMetadataSheet: View {
             }
         }
         .padding(16)
-        .frame(minWidth: 420, minHeight: 260)
+        .frame(minWidth: 420, minHeight: 360)
     }
 }
 
@@ -1157,6 +1280,14 @@ private struct ReplayMomentState {
 }
 
 private enum ReplayEngine {
+    static func durationMs(from log: EventLogRecord) -> Double {
+        let timelineEvents = timeline(from: log)
+        guard let last = timelineEvents.last?.relativeMs, last.isFinite, last > 0 else {
+            return 0
+        }
+        return last
+    }
+
     static func timeline(from log: EventLogRecord) -> [ReplayTimelineEvent] {
         let startEpoch = parseISO(log.startedAt) ?? 0
         let events = log.events.map { entry -> ReplayTimelineEvent in
@@ -1321,8 +1452,11 @@ private struct ReplaySessionSheet: View {
     private let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
     private let speedOptions: [Double] = [0.5, 1.0, 2.0, 4.0]
 
-    private var durationMs: Double {
-        max(timeline.last?.relativeMs ?? 0, 1)
+    private var totalDurationMs: Double {
+        guard let last = timeline.last?.relativeMs, last.isFinite, last > 0 else {
+            return 0
+        }
+        return last
     }
 
     private var moment: ReplayMomentState {
@@ -1330,8 +1464,8 @@ private struct ReplaySessionSheet: View {
     }
 
     private var progressPercent: Double {
-        guard durationMs > 0 else { return 0 }
-        return min(1, max(0, positionMs / durationMs))
+        guard totalDurationMs > 0 else { return 0 }
+        return min(1, max(0, positionMs / totalDurationMs))
     }
 
     var body: some View {
@@ -1353,15 +1487,21 @@ private struct ReplaySessionSheet: View {
                 .foregroundStyle(theme.accent)
 
             VStack(spacing: 6) {
-                Slider(value: $positionMs, in: 0 ... durationMs, step: 10)
-                    .tint(theme.accent)
-                    .disabled(timeline.isEmpty)
+                if totalDurationMs > 0 {
+                    Slider(value: $positionMs, in: 0 ... totalDurationMs, step: 10)
+                        .tint(theme.accent)
+                } else {
+                    Text("No timeline data")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack {
                     Text(state.clockString(from: 0))
                     Spacer()
                     Text(state.clockString(from: positionMs))
                     Spacer()
-                    Text(state.clockString(from: durationMs))
+                    Text(state.clockString(from: totalDurationMs))
                 }
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(theme.muted)
@@ -1388,14 +1528,15 @@ private struct ReplaySessionSheet: View {
                 .frame(width: 60)
 
                 Button(isPlaying ? "⏸" : "▶") {
-                    if timeline.isEmpty { return }
+                    if timeline.isEmpty || totalDurationMs <= 0 { return }
                     isPlaying.toggle()
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
                 .frame(width: 60)
 
                 Button("▶▶") {
-                    positionMs = min(durationMs, positionMs + 10_000)
+                    guard totalDurationMs > 0 else { return }
+                    positionMs = min(totalDurationMs, positionMs + 10_000)
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
                 .frame(width: 60)
@@ -1431,7 +1572,7 @@ private struct ReplaySessionSheet: View {
                     ForEach(Array(stride(from: 0, to: moment.channels.count, by: 3)), id: \.self) { startIndex in
                         let endIndex = min(startIndex + 3, moment.channels.count)
                         let line = moment.channels[startIndex ..< endIndex]
-                            .map { "CH\($0.id): \($0.mix)" }
+                            .map { "CH\($0.id) A:\($0.inputA ? 1 : 0) B:\($0.inputB ? 1 : 0) M:\($0.mix)" }
                             .joined(separator: "   ")
                         Text(line)
                             .font(.system(size: 12, design: .monospaced))
@@ -1446,6 +1587,12 @@ private struct ReplaySessionSheet: View {
             Text("Last event: \(moment.lastEvent?.entry.summary ?? "None yet")")
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(theme.strongText)
+
+            if let last = moment.lastEvent {
+                Text("Event type: [\(last.entry.type)] from \(last.entry.source)")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(theme.muted)
+            }
 
             Text(nextEventDescription())
                 .font(.system(size: 12, design: .monospaced))
@@ -1474,18 +1621,26 @@ private struct ReplaySessionSheet: View {
         .background(theme.background)
         .onAppear {
             timeline = ReplayEngine.timeline(from: eventLog)
-            if positionMs > durationMs {
-                positionMs = durationMs
+            if totalDurationMs <= 0 {
+                positionMs = 0
+                isPlaying = false
+            } else if positionMs > totalDurationMs {
+                positionMs = totalDurationMs
             }
         }
         .onReceive(timer) { _ in
             guard isPlaying else { return }
-            if positionMs >= durationMs {
+            guard totalDurationMs > 0 else {
+                isPlaying = false
+                positionMs = 0
+                return
+            }
+            if positionMs >= totalDurationMs {
                 isPlaying = false
                 return
             }
-            positionMs = min(durationMs, positionMs + (50.0 * playbackSpeed))
-            if positionMs >= durationMs {
+            positionMs = min(totalDurationMs, positionMs + (50.0 * playbackSpeed))
+            if positionMs >= totalDurationMs {
                 isPlaying = false
             }
         }

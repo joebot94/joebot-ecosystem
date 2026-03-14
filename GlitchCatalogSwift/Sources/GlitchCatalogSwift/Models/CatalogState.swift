@@ -193,13 +193,14 @@ final class CatalogState: ObservableObject {
         selectedMediaID = mediaID
     }
 
-    func createSession(title: String, date: String, location: String, notes: String) {
+    func createSession(title: String, date: String, location: String, notes: String, tags: [String]) {
         let session = SessionRecord(
             id: UUID(),
             title: title,
             date: date,
             location: location,
-            notes: notes
+            notes: notes,
+            tags: tags
         )
 
         let document = SessionDocument(
@@ -218,13 +219,14 @@ final class CatalogState: ObservableObject {
         refreshSessionIndex(selecting: session.id)
     }
 
-    func updateSelectedSession(title: String, date: String, location: String, notes: String) {
+    func updateSelectedSession(title: String, date: String, location: String, notes: String, tags: [String]) {
         guard let selectedSessionID, var document = documentsBySessionID[selectedSessionID] else { return }
 
         document.session.title = title
         document.session.date = date
         document.session.location = location
         document.session.notes = notes
+        document.session.tags = tags
         document.name = title
 
         documentsBySessionID[selectedSessionID] = document
@@ -440,7 +442,9 @@ final class CatalogState: ObservableObject {
                     codec: metadata.codec,
                     createdAt: ISO8601DateFormatter().string(from: createdAt),
                     notes: "\(fileName) | \(noteSuffix)",
-                    thumbnailPath: ""
+                    thumbnailPath: "",
+                    toolPath: "",
+                    settingsNotes: ""
                 )
                 newestMediaID = record.id
                 document.media.append(record)
@@ -454,13 +458,15 @@ final class CatalogState: ObservableObject {
         }
     }
 
-    func updateSelectedMedia(kind: String, notes: String) {
+    func updateSelectedMedia(kind: String, notes: String, toolPath: String, settingsNotes: String) {
         guard let selectedMediaID else { return }
 
         updateSelectedDocument { document in
             guard let index = document.media.firstIndex(where: { $0.id == selectedMediaID }) else { return }
             document.media[index].kind = kind.trimmingCharacters(in: .whitespacesAndNewlines)
             document.media[index].notes = notes
+            document.media[index].toolPath = toolPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            document.media[index].settingsNotes = settingsNotes
         }
 
         showToast("Media updated")
@@ -513,7 +519,7 @@ final class CatalogState: ObservableObject {
         let exportURL = exportsDirectoryURL()
             .appendingPathComponent("media_\(selectedSession.id.uuidString.lowercased())_\(exportTimestampTag()).csv")
 
-        var csv = "id,session_id,file_path,kind,checksum,duration,width,height,codec,created_at,notes,thumbnail_path\n"
+        var csv = "id,session_id,file_path,kind,checksum,duration,width,height,codec,created_at,notes,thumbnail_path,tool_path,settings_notes\n"
         for row in rows {
             csv.append(
                 [
@@ -529,6 +535,8 @@ final class CatalogState: ObservableObject {
                     csvEscape(row.createdAt),
                     csvEscape(row.notes),
                     csvEscape(row.thumbnailPath),
+                    csvEscape(row.toolPath),
+                    csvEscape(row.settingsNotes),
                 ].joined(separator: ",")
             )
             csv.append("\n")

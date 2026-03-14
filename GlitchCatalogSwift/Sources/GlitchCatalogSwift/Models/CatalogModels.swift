@@ -7,6 +7,45 @@ struct SessionRecord: Codable, Identifiable, Hashable {
     var date: String
     var location: String
     var notes: String
+    var tags: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case date
+        case location
+        case notes
+        case tags
+    }
+
+    init(id: UUID, title: String, date: String, location: String, notes: String, tags: [String] = []) {
+        self.id = id
+        self.title = title
+        self.date = date
+        self.location = location
+        self.notes = notes
+        self.tags = tags
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        date = try container.decode(String.self, forKey: .date)
+        location = try container.decodeIfPresent(String.self, forKey: .location) ?? ""
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(date, forKey: .date)
+        try container.encode(location, forKey: .location)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(tags, forKey: .tags)
+    }
 }
 
 struct TapeRecord: Codable, Identifiable, Hashable {
@@ -79,6 +118,93 @@ struct MediaRecord: Codable, Identifiable, Hashable {
     var createdAt: String
     var notes: String
     var thumbnailPath: String
+    var toolPath: String
+    var settingsNotes: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sessionID = "sessionID"
+        case filePath = "filePath"
+        case kind
+        case checksum
+        case duration
+        case width
+        case height
+        case codec
+        case createdAt = "createdAt"
+        case notes
+        case thumbnailPath = "thumbnailPath"
+        case toolPath = "toolPath"
+        case settingsNotes = "settingsNotes"
+    }
+
+    init(
+        id: UUID,
+        sessionID: UUID,
+        filePath: String,
+        kind: String,
+        checksum: String,
+        duration: Double,
+        width: Int,
+        height: Int,
+        codec: String,
+        createdAt: String,
+        notes: String,
+        thumbnailPath: String,
+        toolPath: String = "",
+        settingsNotes: String = ""
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.filePath = filePath
+        self.kind = kind
+        self.checksum = checksum
+        self.duration = duration
+        self.width = width
+        self.height = height
+        self.codec = codec
+        self.createdAt = createdAt
+        self.notes = notes
+        self.thumbnailPath = thumbnailPath
+        self.toolPath = toolPath
+        self.settingsNotes = settingsNotes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        filePath = try container.decode(String.self, forKey: .filePath)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? ""
+        checksum = try container.decodeIfPresent(String.self, forKey: .checksum) ?? ""
+        duration = try container.decodeIfPresent(Double.self, forKey: .duration) ?? 0
+        width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 0
+        height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 0
+        codec = try container.decodeIfPresent(String.self, forKey: .codec) ?? ""
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        thumbnailPath = try container.decodeIfPresent(String.self, forKey: .thumbnailPath) ?? ""
+        toolPath = try container.decodeIfPresent(String.self, forKey: .toolPath) ?? ""
+        settingsNotes = try container.decodeIfPresent(String.self, forKey: .settingsNotes) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(filePath, forKey: .filePath)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(checksum, forKey: .checksum)
+        try container.encode(duration, forKey: .duration)
+        try container.encode(width, forKey: .width)
+        try container.encode(height, forKey: .height)
+        try container.encode(codec, forKey: .codec)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(thumbnailPath, forKey: .thumbnailPath)
+        try container.encode(toolPath, forKey: .toolPath)
+        try container.encode(settingsNotes, forKey: .settingsNotes)
+    }
 }
 
 struct PresetRecord: Codable, Identifiable, Hashable {
