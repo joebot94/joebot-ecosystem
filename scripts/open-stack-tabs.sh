@@ -32,6 +32,18 @@ else
   echo "Nexus already running on port 8675."
 fi
 
+echo "Waiting for Nexus on port 8675..."
+for _ in {1..40}; do
+  if lsof -iTCP:8675 -sTCP:LISTEN >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.2
+done
+
+if ! lsof -iTCP:8675 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Warning: Nexus did not come online yet. Apps will still launch and retry."
+fi
+
 open "$DIST_DIR/DirtyMixerApp.app"
 open "$DIST_DIR/GlitchCatalogSwift.app"
 open "$DIST_DIR/Observatory.app"

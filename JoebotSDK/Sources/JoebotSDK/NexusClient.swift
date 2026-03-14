@@ -32,6 +32,9 @@ public final class NexusClient: ObservableObject {
     private var heartbeatTimer: Timer?
     private let session = URLSession(configuration: .default)
     private var clientMap: [String: NexusClientInfo] = [:]
+    private var reconnectTask: Task<Void, Never>?
+    private var manualDisconnectRequested = false
+    private let reconnectDelayNanoseconds: UInt64 = 2_000_000_000
 
     public init(clientId: String, clientType: String = "app") {
         self.clientId = clientId
@@ -42,7 +45,10 @@ public final class NexusClient: ObservableObject {
         serverHost = host
         serverPort = port
 
-        disconnect()
+        manualDisconnectRequested = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        resetConnectionState()
 
         guard let url = URL(string: "ws://\(host):\(port)") else {
             statusText = "Invalid URL"
@@ -67,18 +73,25 @@ public final class NexusClient: ObservableObject {
                 isConnecting = false
                 connectedAt = Date()
                 statusText = "Connected to \(host):\(port)"
+                reconnectTask?.cancel()
+                reconnectTask = nil
                 startHeartbeat()
-                receiveNextMessage()
+                receiveNextMessage(on: task)
             } catch {
-                isConnected = false
-                isConnecting = false
-                statusText = "Connect failed"
-                print("[NexusClient] connect error: \(error)")
+                handleConnectionLost(reason: "Connect failed", error: error, retry: true)
             }
         }
     }
 
     public func disconnect() {
+        manualDisconnectRequested = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        resetConnectionState()
+        statusText = "Disconnected"
+    }
+
+    private func resetConnectionState() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
 
@@ -88,7 +101,6 @@ public final class NexusClient: ObservableObject {
         isConnected = false
         isConnecting = false
         connectedAt = nil
-        statusText = "Disconnected"
     }
 
     public func sendHeartbeat() {
@@ -127,12 +139,11 @@ public final class NexusClient: ObservableObject {
         }
     }
 
-    private func receiveNextMessage() {
-        guard let webSocketTask else { return }
-
-        webSocketTask.receive { [weak self] result in
+    private func receiveNextMessage(on task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard self.webSocketTask === task else { return }
 
                 switch result {
                 case let .success(message):
@@ -146,14 +157,39 @@ public final class NexusClient: ObservableObject {
                     @unknown default:
                         break
                     }
-                    self.receiveNextMessage()
+                    self.receiveNextMessage(on: task)
 
                 case let .failure(error):
-                    self.isConnected = false
-                    self.isConnecting = false
-                    self.statusText = "Disconnected"
-                    print("[NexusClient] receive error: \(error)")
+                    self.handleConnectionLost(reason: "Disconnected", error: error, retry: true)
                 }
+            }
+        }
+    }
+
+    private func handleConnectionLost(reason: String, error: Error? = nil, retry: Bool) {
+        resetConnectionState()
+        statusText = reason
+        if let error {
+            print("[NexusClient] \(reason.lowercased()) error: \(error)")
+        }
+        if retry {
+            scheduleReconnectIfNeeded()
+        }
+    }
+
+    private func scheduleReconnectIfNeeded() {
+        guard autoConnect, !manualDisconnectRequested else { return }
+        guard reconnectTask == nil else { return }
+
+        statusText = "Disconnected (retrying...)"
+        let retryDelay = reconnectDelayNanoseconds
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: retryDelay)
+            await MainActor.run {
+                guard let self else { return }
+                self.reconnectTask = nil
+                guard self.autoConnect, !self.manualDisconnectRequested else { return }
+                self.connect(to: self.serverHost, port: self.serverPort)
             }
         }
     }
