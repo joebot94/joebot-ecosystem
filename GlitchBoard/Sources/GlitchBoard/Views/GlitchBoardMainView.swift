@@ -318,7 +318,8 @@ private struct CueEditorPanel: View {
     private func cueEditorContent(selectedCue: TimelineCue) -> some View {
         let laneOptions = state.lanes
         let actionOptions = state.availableActions(for: selectedCue.laneID)
-        let action = state.actionDefinition(for: selectedCue.laneID, actionID: selectedCue.actionID) ?? actionOptions.first
+        let resolvedActionID = state.resolvedActionID(for: selectedCue)
+        let action = state.actionDefinition(for: selectedCue.laneID, actionID: resolvedActionID) ?? actionOptions.first
 
         Picker("Device", selection: Binding(get: { selectedCue.laneID }, set: { state.updateSelectedCueLane($0) })) {
             ForEach(laneOptions) { lane in
@@ -326,7 +327,7 @@ private struct CueEditorPanel: View {
             }
         }
 
-        Picker("Action", selection: Binding(get: { selectedCue.actionID }, set: { state.updateSelectedCueAction($0) })) {
+        Picker("Action", selection: Binding(get: { resolvedActionID }, set: { state.updateSelectedCueAction($0) })) {
             ForEach(actionOptions) { action in
                 Text(action.name).tag(action.id)
             }

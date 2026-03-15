@@ -207,6 +207,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
         availableActions(for: laneID).first(where: { $0.id == actionID })
     }
 
+    func resolvedActionID(for cue: TimelineCue) -> String {
+        let actions = availableActions(for: cue.laneID)
+        if actions.contains(where: { $0.id == cue.actionID }) {
+            return cue.actionID
+        }
+        return actions.first?.id ?? cue.actionID
+    }
+
     func updateSelectedCueLane(_ laneID: String) {
         guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
         cues[index].laneID = laneID
@@ -366,7 +374,15 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     func selectCue(_ cueID: UUID?) {
         selectedCueID = cueID
-        if let cueID, let cue = cues.first(where: { $0.id == cueID }) {
+        if let cueID, let index = cues.firstIndex(where: { $0.id == cueID }) {
+            let resolvedAction = resolvedActionID(for: cues[index])
+            if cues[index].actionID != resolvedAction {
+                cues[index].actionID = resolvedAction
+                if let action = actionDefinition(for: cues[index].laneID, actionID: resolvedAction) {
+                    applyDefaultParams(forCueAt: index, using: action)
+                }
+            }
+            let cue = cues[index]
             selectedCueLabelDraft = cue.label
         } else {
             selectedCueLabelDraft = ""
@@ -1111,7 +1127,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
         actionDefinitionsByClient[target] = parseActions(from: capabilities)
 
         if let index = lanes.firstIndex(where: { $0.target == target }),
-           let label = (capabilities["device_label"] as? String) ?? (capabilities["label"] as? String),
+           let label = (capabilities["device_label"] as? String)
+               ?? (capabilities["label"] as? String)
+               ?? ((capabilities["device"] as? [String: Any])?["label"] as? String),
            !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             lanes[index].name = label
@@ -1243,7 +1261,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
         if let rawActions = root["actions"] as? [[String: Any]] {
             for raw in rawActions {
                 let actionID = (raw["id"] as? String) ?? (raw["action"] as? String) ?? (raw["name"] as? String) ?? "action"
-                let actionName = (raw["label"] as? String) ?? (raw["name"] as? String) ?? actionID
+                let actionName = (raw["label"] as? String) ?? (raw["name"] as? String) ?? (raw["action"] as? String) ?? actionID
                 let params = parseParams(from: raw["params"])
                 actions.append(CueActionDefinition(id: actionID, name: actionName, params: params))
             }
@@ -1284,8 +1302,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 let key = (row["key"] as? String) ?? (row["name"] as? String) ?? "value"
                 let name = (row["label"] as? String) ?? key
                 let typeHint = (row["type"] as? String)?.lowercased()
-                let minValue = doubleValue(row["min"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : 0)
-                let maxValue = doubleValue(row["max"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 1 : 255)
+                let range = parseRange(row["range"])
+                let minValue = range?.0 ?? doubleValue(row["min"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : 0)
+                let maxValue = range?.1 ?? doubleValue(row["max"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 1 : 255)
                 let defaultValue = doubleValue(row["default"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : min(max(minValue, 127), maxValue))
                 params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
             }
@@ -1298,8 +1317,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 let name = row?["label"] as? String ?? key
                 let typeHint = (row?["type"] as? String)?.lowercased()
                 let optionCount = (row?["options"] as? [Any])?.count ?? 0
-                let minValue = doubleValue(row?["min"]) ?? 0
-                let maxValue = doubleValue(row?["max"]) ?? {
+                let range = parseRange(row?["range"])
+                let minValue = range?.0 ?? doubleValue(row?["min"]) ?? 0
+                let maxValue = range?.1 ?? doubleValue(row?["max"]) ?? {
                     if typeHint == "bool" || typeHint == "boolean" {
                         return 1.0
                     }
@@ -1314,6 +1334,19 @@ final class GlitchBoardState: NSObject, ObservableObject {
         }
 
         return params.sorted { $0.key < $1.key }
+    }
+
+    private func parseRange(_ raw: Any?) -> (Double, Double)? {
+        if let range = raw as? [Double], range.count >= 2 {
+            return (range[0], range[1])
+        }
+        if let range = raw as? [Int], range.count >= 2 {
+            return (Double(range[0]), Double(range[1]))
+        }
+        if let range = raw as? [NSNumber], range.count >= 2 {
+            return (range[0].doubleValue, range[1].doubleValue)
+        }
+        return nil
     }
 
     private func doubleValue(_ value: Any?) -> Double? {
