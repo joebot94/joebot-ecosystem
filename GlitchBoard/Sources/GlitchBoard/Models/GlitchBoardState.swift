@@ -79,9 +79,180 @@ final class GlitchBoardState: NSObject, ObservableObject {
             id: "glitchboard.cue.trigger",
             name: "glitchboard.cue.trigger",
             params: [
-                CueParamDefinition(id: "intensity", key: "intensity", name: "intensity", minValue: 0, maxValue: 255, defaultValue: 127),
+                CueParamDefinition(
+                    id: "intensity",
+                    key: "intensity",
+                    name: "intensity",
+                    minValue: 0,
+                    maxValue: 255,
+                    defaultValue: 127,
+                    valueType: .integer,
+                    stepValue: 1
+                ),
             ]
         )
+    ]
+
+    private struct CapabilityProfile {
+        let matchTokens: [String]
+        let actions: [CueActionDefinition]
+    }
+
+    private static func intParam(_ key: String, _ name: String, min: Double, max: Double, default defaultValue: Double) -> CueParamDefinition {
+        CueParamDefinition(
+            id: key,
+            key: key,
+            name: name,
+            minValue: min,
+            maxValue: max,
+            defaultValue: defaultValue,
+            valueType: .integer,
+            stepValue: 1
+        )
+    }
+
+    private static func boolParam(_ key: String, _ name: String, default defaultValue: Bool = false) -> CueParamDefinition {
+        CueParamDefinition(
+            id: key,
+            key: key,
+            name: name,
+            minValue: 0,
+            maxValue: 1,
+            defaultValue: defaultValue ? 1 : 0,
+            valueType: .boolean,
+            stepValue: 1
+        )
+    }
+
+    private static func optionParam(_ key: String, _ name: String, options: [CueParamOption], default defaultValue: Double) -> CueParamDefinition {
+        let minValue = options.map(\.value).min() ?? 0
+        let maxValue = options.map(\.value).max() ?? 0
+        return CueParamDefinition(
+            id: key,
+            key: key,
+            name: name,
+            minValue: minValue,
+            maxValue: maxValue,
+            defaultValue: defaultValue,
+            valueType: .option,
+            stepValue: 1,
+            options: options
+        )
+    }
+
+    private static let bootstrapCapabilityProfiles: [CapabilityProfile] = [
+        CapabilityProfile(
+            matchTokens: ["mtpx", "extron"],
+            actions: [
+                CueActionDefinition(
+                    id: "set_input_skew",
+                    name: "set_input_skew",
+                    params: [
+                        intParam("input", "input", min: 1, max: 16, default: 3),
+                        intParam("red", "red", min: 0, max: 31, default: 0),
+                        intParam("green", "green", min: 0, max: 31, default: 0),
+                        intParam("blue", "blue", min: 0, max: 31, default: 0),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "set_input_prepeak",
+                    name: "set_input_prepeak",
+                    params: [
+                        intParam("input", "input", min: 1, max: 16, default: 3),
+                        intParam("level", "level", min: 0, max: 255, default: 127),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "recall_preset",
+                    name: "recall_preset",
+                    params: [
+                        intParam("preset", "preset", min: 1, max: 32, default: 1),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "route_tie",
+                    name: "route_tie",
+                    params: [
+                        intParam("input", "input", min: 1, max: 16, default: 1),
+                        intParam("output", "output", min: 1, max: 16, default: 1),
+                        optionParam(
+                            "mode",
+                            "mode",
+                            options: [
+                                CueParamOption(id: "all", label: "all", value: 0),
+                                CueParamOption(id: "rgb", label: "rgb", value: 1),
+                                CueParamOption(id: "video", label: "video", value: 2),
+                                CueParamOption(id: "audio", label: "audio", value: 3),
+                            ],
+                            default: 0
+                        ),
+                    ]
+                ),
+            ]
+        ),
+        CapabilityProfile(
+            matchTokens: ["dirty", "mixer"],
+            actions: [
+                CueActionDefinition(
+                    id: "set_channel_mix",
+                    name: "set_channel_mix",
+                    params: [
+                        intParam("channel", "channel", min: 1, max: 8, default: 1),
+                        intParam("mix", "mix", min: 0, max: 255, default: 127),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "set_channel_mute",
+                    name: "set_channel_mute",
+                    params: [
+                        intParam("channel", "channel", min: 1, max: 8, default: 1),
+                        boolParam("muted", "muted", default: false),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "recall_preset",
+                    name: "recall_preset",
+                    params: [
+                        intParam("preset", "preset", min: 1, max: 32, default: 1),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "mix.ramp",
+                    name: "mix.ramp",
+                    params: [
+                        intParam("start", "start", min: 0, max: 255, default: 0),
+                        intParam("end", "end", min: 0, max: 255, default: 255),
+                    ]
+                ),
+            ]
+        ),
+        CapabilityProfile(
+            matchTokens: ["atlas", "ipcp", "relay"],
+            actions: [
+                CueActionDefinition(
+                    id: "atlas.route",
+                    name: "atlas.route",
+                    params: [
+                        intParam("input", "input", min: 1, max: 16, default: 1),
+                        intParam("output", "output", min: 1, max: 16, default: 1),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "pulse_relay",
+                    name: "pulse_relay",
+                    params: [
+                        intParam("relay", "relay", min: 1, max: 8, default: 1),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "recall_preset",
+                    name: "recall_preset",
+                    params: [
+                        intParam("preset", "preset", min: 1, max: 32, default: 1),
+                    ]
+                ),
+            ]
+        ),
     ]
 
     private static let defaultLibraryTemplates: [LibraryCueTemplate] = [
@@ -204,7 +375,28 @@ final class GlitchBoardState: NSObject, ObservableObject {
         })?.value, !matched.isEmpty {
             return matched
         }
+        if let bootstrap = bootstrapActions(for: lane), !bootstrap.isEmpty {
+            return bootstrap
+        }
         return Self.fallbackActions
+    }
+
+    func actionSourceLabel(for laneID: String) -> String {
+        guard let lane = lanes.first(where: { $0.id == laneID }) else {
+            return "Fallback"
+        }
+        if let direct = actionDefinitionsByClient[lane.target], !direct.isEmpty {
+            return "Nexus"
+        }
+        if let matched = actionDefinitionsByClient.first(where: { key, value in
+            !value.isEmpty && lane.discoveryHints.contains(where: { key.lowercased().contains($0.lowercased()) })
+        })?.value, !matched.isEmpty {
+            return "Nexus"
+        }
+        if let bootstrap = bootstrapActions(for: lane), !bootstrap.isEmpty {
+            return "Bootstrapped"
+        }
+        return "Fallback"
     }
 
     func actionDefinition(for laneID: String, actionID: String) -> CueActionDefinition? {
@@ -243,13 +435,34 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     func updateSelectedCueParam(key: String, value: Double) {
         guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
-        cues[index].params[key] = value
+        cues[index].params[key] = normalizedParamValue(
+            key: key,
+            value: value,
+            laneID: cues[index].laneID,
+            actionID: cues[index].actionID
+        )
     }
 
     func updateSelectedRangeParam(key: String, startValue: Double, endValue: Double) {
         guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
-        cues[index].startParams[key] = startValue
-        cues[index].endParams[key] = endValue
+        cues[index].startParams[key] = normalizedParamValue(
+            key: key,
+            value: startValue,
+            laneID: cues[index].laneID,
+            actionID: cues[index].actionID
+        )
+        cues[index].endParams[key] = normalizedParamValue(
+            key: key,
+            value: endValue,
+            laneID: cues[index].laneID,
+            actionID: cues[index].actionID
+        )
+    }
+
+    func setCueMute(_ cueID: UUID, muted: Bool) {
+        guard let index = cues.firstIndex(where: { $0.id == cueID }) else { return }
+        cues[index].muted = muted
+        statusText = muted ? "Cue muted" : "Cue unmuted"
     }
 
     func updateSelectedCueInterpolation(_ interpolation: CueInterpolation) {
@@ -434,8 +647,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     func toggleMute(_ cueID: UUID) {
         guard let index = cues.firstIndex(where: { $0.id == cueID }) else { return }
-        cues[index].muted.toggle()
-        statusText = cues[index].muted ? "Cue muted" : "Cue unmuted"
+        setCueMute(cueID, muted: !cues[index].muted)
     }
 
     func cycleInterpolation(for cueID: UUID) {
@@ -587,6 +799,41 @@ final class GlitchBoardState: NSObject, ObservableObject {
         cues[index].params = defaults
         cues[index].startParams = defaults
         cues[index].endParams = defaults
+    }
+
+    private func bootstrapActions(for lane: CueLane) -> [CueActionDefinition]? {
+        let lookup = "\(lane.name) \(lane.target) \(lane.discoveryHints.joined(separator: " "))".lowercased()
+        return Self.bootstrapCapabilityProfiles.first(where: { profile in
+            profile.matchTokens.contains(where: { token in lookup.contains(token.lowercased()) })
+        })?.actions
+    }
+
+    private func normalizedParamValue(key: String, value: Double, laneID: String, actionID: String) -> Double {
+        guard let action = actionDefinition(for: laneID, actionID: actionID),
+              let definition = action.params.first(where: { $0.key == key })
+        else {
+            return value
+        }
+
+        var normalized = min(max(value, definition.minValue), definition.maxValue)
+
+        if !definition.options.isEmpty {
+            if let closest = definition.options.min(by: { abs($0.value - normalized) < abs($1.value - normalized) }) {
+                normalized = closest.value
+            }
+            return normalized
+        }
+
+        switch definition.valueType {
+        case .boolean:
+            return normalized >= 0.5 ? 1 : 0
+        case .integer:
+            return normalized.rounded()
+        case .decimal:
+            return normalized
+        case .option:
+            return normalized.rounded()
+        }
     }
 
     private func startPlayheadTimer() {
@@ -1263,7 +1510,17 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     private func parseActions(from capabilities: [String: Any]) -> [CueActionDefinition] {
         var actions: [CueActionDefinition] = []
-        let root = (capabilities["capabilities"] as? [String: Any]) ?? capabilities
+        let root: [String: Any] = {
+            if let nested = capabilities["capabilities"] as? [String: Any] {
+                return nested
+            }
+            if let payload = capabilities["payload"] as? [String: Any],
+               let nested = payload["capabilities"] as? [String: Any]
+            {
+                return nested
+            }
+            return capabilities
+        }()
 
         if let rawActions = root["actions"] as? [[String: Any]] {
             for raw in rawActions {
@@ -1306,41 +1563,151 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
         if let list = rawParams as? [[String: Any]] {
             for row in list {
-                let key = (row["key"] as? String) ?? (row["name"] as? String) ?? "value"
-                let name = (row["label"] as? String) ?? key
-                let typeHint = (row["type"] as? String)?.lowercased()
-                let range = parseRange(row["range"])
-                let minValue = range?.0 ?? doubleValue(row["min"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : 0)
-                let maxValue = range?.1 ?? doubleValue(row["max"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 1 : 255)
-                let defaultValue = doubleValue(row["default"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : min(max(minValue, 127), maxValue))
-                params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
+                if let definition = parseParamDefinition(keyHint: nil, row: row) {
+                    params.append(definition)
+                }
             }
-            return params
+            return params.sorted { $0.key < $1.key }
         }
 
         if let map = rawParams as? [String: Any] {
             for (key, rowRaw) in map {
-                let row = rowRaw as? [String: Any]
-                let name = row?["label"] as? String ?? key
-                let typeHint = (row?["type"] as? String)?.lowercased()
-                let optionCount = (row?["options"] as? [Any])?.count ?? 0
-                let range = parseRange(row?["range"])
-                let minValue = range?.0 ?? doubleValue(row?["min"]) ?? 0
-                let maxValue = range?.1 ?? doubleValue(row?["max"]) ?? {
-                    if typeHint == "bool" || typeHint == "boolean" {
-                        return 1.0
-                    }
-                    if optionCount > 0 {
-                        return Double(max(0, optionCount - 1))
-                    }
-                    return 255.0
-                }()
-                let defaultValue = doubleValue(row?["default"]) ?? min(max(minValue, 0), maxValue)
-                params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
+                let row = (rowRaw as? [String: Any]) ?? [:]
+                if let definition = parseParamDefinition(keyHint: key, row: row) {
+                    params.append(definition)
+                }
             }
         }
 
         return params.sorted { $0.key < $1.key }
+    }
+
+    private func parseParamDefinition(keyHint: String?, row: [String: Any]) -> CueParamDefinition? {
+        let key = keyHint
+            ?? (row["key"] as? String)
+            ?? (row["id"] as? String)
+            ?? (row["name"] as? String)
+            ?? "value"
+        guard !key.isEmpty else { return nil }
+
+        let name = (row["label"] as? String)
+            ?? (row["name"] as? String)
+            ?? key
+        let typeHint = (row["type"] as? String)?.lowercased() ?? ""
+        let options = parseParamOptions(row["options"])
+        let range = parseRange(row["range"])
+        let isBoolType = typeHint == "bool" || typeHint == "boolean"
+
+        let minValue = range?.0
+            ?? doubleValue(row["min"])
+            ?? (options.map(\.value).min() ?? (isBoolType ? 0 : 0))
+        let maxValue = range?.1
+            ?? doubleValue(row["max"])
+            ?? (options.map(\.value).max() ?? (isBoolType ? 1 : 255))
+
+        var defaultValue = doubleValue(row["default"])
+            ?? doubleValue(row["value"])
+            ?? min(max(minValue, 0), maxValue)
+        defaultValue = min(max(defaultValue, minValue), maxValue)
+
+        let inferredType: CueParamValueType = {
+            if isBoolType { return .boolean }
+            if !options.isEmpty { return .option }
+            if typeHint == "float" || typeHint == "double" || typeHint == "decimal" {
+                return .decimal
+            }
+            if !isIntegerLike(minValue) || !isIntegerLike(maxValue) || !isIntegerLike(defaultValue) {
+                return .decimal
+            }
+            return .integer
+        }()
+
+        if !options.isEmpty,
+           options.contains(where: { $0.value == defaultValue }) == false,
+           let closest = options.min(by: { abs($0.value - defaultValue) < abs($1.value - defaultValue) })
+        {
+            defaultValue = closest.value
+        }
+
+        let stepValue: Double = {
+            switch inferredType {
+            case .boolean, .integer, .option: return 1
+            case .decimal:
+                let span = maxValue - minValue
+                if span <= 1 { return 0.01 }
+                if span <= 10 { return 0.05 }
+                return 0.1
+            }
+        }()
+
+        return CueParamDefinition(
+            id: key,
+            key: key,
+            name: name,
+            minValue: minValue,
+            maxValue: maxValue,
+            defaultValue: defaultValue,
+            valueType: inferredType,
+            stepValue: stepValue,
+            options: options.sorted { $0.value < $1.value }
+        )
+    }
+
+    private func parseParamOptions(_ raw: Any?) -> [CueParamOption] {
+        if let options = raw as? [[String: Any]] {
+            return options.enumerated().compactMap { index, row in
+                let fallbackValue = Double(index)
+                let value = doubleValue(row["value"]) ?? doubleValue(row["id"]) ?? fallbackValue
+                let label = (row["label"] as? String)
+                    ?? (row["name"] as? String)
+                    ?? (row["title"] as? String)
+                    ?? String(describing: row["value"] ?? row["id"] ?? index)
+                return CueParamOption(id: "\(label)_\(index)", label: label, value: value)
+            }
+        }
+
+        if let map = raw as? [String: Any] {
+            return map.enumerated().compactMap { index, pair in
+                let value = doubleValue(pair.value) ?? Double(index)
+                return CueParamOption(id: "\(pair.key)_\(index)", label: pair.key, value: value)
+            }
+        }
+
+        if let strings = raw as? [String] {
+            return strings.enumerated().map { index, label in
+                CueParamOption(id: "\(label)_\(index)", label: label, value: Double(index))
+            }
+        }
+
+        if let ints = raw as? [Int] {
+            return ints.map { value in
+                CueParamOption(id: "opt_\(value)", label: "\(value)", value: Double(value))
+            }
+        }
+
+        if let doubles = raw as? [Double] {
+            return doubles.map { value in
+                CueParamOption(id: "opt_\(value)", label: "\(value)", value: value)
+            }
+        }
+
+        if let mixed = raw as? [Any] {
+            return mixed.enumerated().compactMap { index, entry in
+                if let value = doubleValue(entry) {
+                    return CueParamOption(id: "opt_\(index)", label: "\(value)", value: value)
+                }
+                if let text = entry as? String {
+                    return CueParamOption(id: "\(text)_\(index)", label: text, value: Double(index))
+                }
+                return nil
+            }
+        }
+
+        return []
+    }
+
+    private func isIntegerLike(_ value: Double) -> Bool {
+        abs(value.rounded() - value) < 0.00001
     }
 
     private func parseRange(_ raw: Any?) -> (Double, Double)? {
@@ -1361,6 +1728,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
         case let v as Double: return v
         case let v as Int: return Double(v)
         case let v as NSNumber: return v.doubleValue
+        case let v as Bool: return v ? 1 : 0
+        case let v as String where v.lowercased() == "true": return 1
+        case let v as String where v.lowercased() == "false": return 0
         case let v as String: return Double(v)
         default: return nil
         }

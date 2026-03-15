@@ -1,3 +1,4 @@
+import Foundation
 import JoebotSDK
 import SwiftUI
 import UniformTypeIdentifiers
@@ -326,14 +327,20 @@ private struct CueEditorPanel: View {
                 Text(lane.name).tag(lane.id)
             }
         }
+        .pickerStyle(.menu)
 
         Picker("Action", selection: Binding(get: { resolvedActionID }, set: { state.updateSelectedCueAction($0) })) {
             ForEach(actionOptions) { action in
                 Text(action.name).tag(action.id)
             }
         }
+        .pickerStyle(.menu)
 
-        Toggle("Muted", isOn: Binding(get: { selectedCue.muted }, set: { _ in state.toggleMute(selectedCue.id) }))
+        Text("Action Source: \(state.actionSourceLabel(for: selectedCue.laneID))")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
+        Toggle("Muted", isOn: Binding(get: { selectedCue.muted }, set: { state.setCueMute(selectedCue.id, muted: $0) }))
 
         if let action {
             Text("Params")
@@ -342,7 +349,7 @@ private struct CueEditorPanel: View {
 
             ForEach(action.params) { param in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(param.name) [\(Int(param.minValue))...\(Int(param.maxValue))]")
+                    Text("\(param.name) [\(paramRangeLabel(param))]")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
@@ -350,37 +357,31 @@ private struct CueEditorPanel: View {
                         HStack {
                             Text("S")
                                 .font(.caption2)
-                            TextField(
-                                "",
+                            compactParamControl(
+                                param: param,
                                 value: Binding(
                                     get: { selectedCue.startParams[param.key] ?? param.defaultValue },
                                     set: { state.updateSelectedRangeParam(key: param.key, startValue: $0, endValue: selectedCue.endParams[param.key] ?? param.defaultValue) }
-                                ),
-                                format: .number
+                                )
                             )
-                            .textFieldStyle(.roundedBorder)
                             Text("E")
                                 .font(.caption2)
-                            TextField(
-                                "",
+                            compactParamControl(
+                                param: param,
                                 value: Binding(
                                     get: { selectedCue.endParams[param.key] ?? param.defaultValue },
                                     set: { state.updateSelectedRangeParam(key: param.key, startValue: selectedCue.startParams[param.key] ?? param.defaultValue, endValue: $0) }
-                                ),
-                                format: .number
+                                )
                             )
-                            .textFieldStyle(.roundedBorder)
                         }
                     } else {
-                        TextField(
-                            "",
+                        fullParamControl(
+                            param: param,
                             value: Binding(
                                 get: { selectedCue.params[param.key] ?? param.defaultValue },
                                 set: { state.updateSelectedCueParam(key: param.key, value: $0) }
-                            ),
-                            format: .number
+                            )
                         )
-                        .textFieldStyle(.roundedBorder)
                     }
                 }
             }
@@ -408,6 +409,80 @@ private struct CueEditorPanel: View {
                 state.deleteCue(selectedCue.id)
             }
         }
+    }
+
+    private func paramRangeLabel(_ param: CueParamDefinition) -> String {
+        if param.valueType == .boolean {
+            return "false/true"
+        }
+        if !param.options.isEmpty {
+            return "\(param.options.count) options"
+        }
+        if param.valueType == .decimal {
+            return "\(formatNumber(param.minValue, decimals: 2))...\(formatNumber(param.maxValue, decimals: 2))"
+        }
+        return "\(Int(param.minValue))...\(Int(param.maxValue))"
+    }
+
+    @ViewBuilder
+    private func compactParamControl(param: CueParamDefinition, value: Binding<Double>) -> some View {
+        switch param.valueType {
+        case .boolean:
+            Toggle("", isOn: Binding(get: { value.wrappedValue >= 0.5 }, set: { value.wrappedValue = $0 ? 1 : 0 }))
+                .labelsHidden()
+        case .option where !param.options.isEmpty:
+            Picker("", selection: value) {
+                ForEach(param.options) { option in
+                    Text(option.label).tag(option.value)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+        default:
+            TextField("", value: value, formatter: numberFormatter(for: param))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 92)
+        }
+    }
+
+    @ViewBuilder
+    private func fullParamControl(param: CueParamDefinition, value: Binding<Double>) -> some View {
+        switch param.valueType {
+        case .boolean:
+            Toggle("", isOn: Binding(get: { value.wrappedValue >= 0.5 }, set: { value.wrappedValue = $0 ? 1 : 0 }))
+                .labelsHidden()
+        case .option where !param.options.isEmpty:
+            Picker("", selection: value) {
+                ForEach(param.options) { option in
+                    Text(option.label).tag(option.value)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+        default:
+            HStack(spacing: 8) {
+                Slider(
+                    value: value,
+                    in: param.minValue ... param.maxValue,
+                    step: max(0.001, param.stepValue)
+                )
+                TextField("", value: value, formatter: numberFormatter(for: param))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 74)
+            }
+        }
+    }
+
+    private func numberFormatter(for param: CueParamDefinition) -> NumberFormatter {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = param.valueType == .decimal ? 3 : 0
+        return formatter
+    }
+
+    private func formatNumber(_ value: Double, decimals: Int) -> String {
+        String(format: "%.\(decimals)f", value)
     }
 }
 
