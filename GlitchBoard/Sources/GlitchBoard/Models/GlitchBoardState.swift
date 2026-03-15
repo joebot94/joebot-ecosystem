@@ -44,6 +44,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private let schedulerLookAhead: TimeInterval = 0.20
     private let rangeAutomationStep: TimeInterval = 0.05
     private let capabilitiesPollInterval: TimeInterval = 3.0
+    private let capabilityBootstrapQueryEnabled = true
+    private let capabilityPollingEnabled = false
 
     private static let placeholderLanes: [CueLane] = [
         CueLane(
@@ -124,7 +126,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
         wireNexusObservers()
         refreshLaneStatusesFromNexus()
         startAutosaveTimer()
-        startCapabilitiesPollingTimer()
+        if capabilityPollingEnabled {
+            startCapabilitiesPollingTimer()
+        }
         showAutosaveRecoveryAlert = autosaveURL.fileExists
     }
 
@@ -1089,6 +1093,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     }
 
     private func startCapabilitiesPollingTimer() {
+        guard capabilityPollingEnabled else { return }
         capabilitiesPollTimer?.invalidate()
         capabilitiesPollTimer = Timer.scheduledTimer(withTimeInterval: capabilitiesPollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -1108,7 +1113,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 if !self.nexusClient.isConnected {
                     self.requestedCapabilityTargets.removeAll()
                 }
-                self.requestCapabilitiesForOnlineClients(force: false)
+                if self.capabilityBootstrapQueryEnabled {
+                    self.requestCapabilitiesForOnlineClients(force: false)
+                }
                 self.refreshLaneStatusesFromNexus()
             }
             .store(in: &subscriptions)
