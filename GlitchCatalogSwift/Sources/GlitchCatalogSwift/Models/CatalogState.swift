@@ -28,10 +28,12 @@ final class CatalogState: ObservableObject {
     @Published var sessionGear: [SessionGearRecord] = []
     @Published var media: [MediaRecord] = []
     @Published var presets: [PresetRecord] = []
+    @Published var replays: [EventLogRecord] = []
     @Published var eventLog: EventLogRecord?
 
     @Published var selectedSessionID: UUID?
     @Published var selectedPresetID: String?
+    @Published var selectedReplayID: String?
     @Published var selectedTapeID: String?
     @Published var selectedGearLinkID: UUID?
     @Published var selectedMediaID: UUID?
@@ -140,8 +142,10 @@ final class CatalogState: ObservableObject {
             sessionGear = []
             media = []
             presets = []
+            replays = []
             eventLog = nil
             selectedPresetID = nil
+            selectedReplayID = nil
             selectedTapeID = nil
             selectedGearLinkID = nil
             selectedMediaID = nil
@@ -153,7 +157,17 @@ final class CatalogState: ObservableObject {
         sessionGear = document.sessionGear
         media = document.media
         presets = document.presets.sorted { $0.createdAt > $1.createdAt }
-        eventLog = document.eventLog
+        let mergedReplays = mergeReplays(from: document)
+        replays = mergedReplays
+
+        if let selectedReplayID,
+           let replay = mergedReplays.first(where: { $0.replayID == selectedReplayID })
+        {
+            eventLog = replay
+        } else {
+            eventLog = mergedReplays.first
+            selectedReplayID = eventLog?.replayID
+        }
 
         if let selectedPresetID, presets.contains(where: { $0.id == selectedPresetID }) {
             self.selectedPresetID = selectedPresetID
@@ -179,6 +193,30 @@ final class CatalogState: ObservableObject {
 
     func selectPreset(_ presetID: String?) {
         selectedPresetID = presetID
+    }
+
+    func selectReplay(_ replayID: String?) {
+        selectedReplayID = replayID
+        eventLog = replays.first(where: { $0.replayID == replayID })
+    }
+
+    func deleteReplay(_ replayID: String) {
+        guard let selectedSessionID, var document = documentsBySessionID[selectedSessionID] else { return }
+
+        document.replays.removeAll { $0.replayID == replayID }
+        if document.eventLog?.replayID == replayID {
+            document.eventLog = document.replays.first
+        }
+
+        documentsBySessionID[selectedSessionID] = document
+        store.saveSessionDocument(document)
+
+        replays = mergeReplays(from: document)
+        if selectedReplayID == replayID {
+            selectedReplayID = replays.first?.replayID
+        }
+        eventLog = replays.first(where: { $0.replayID == selectedReplayID }) ?? replays.first
+        showToast("Replay deleted")
     }
 
     func selectTape(_ tapeID: String?) {
@@ -605,6 +643,7 @@ final class CatalogState: ObservableObject {
             id: draft.id,
             name: finalName,
             createdAt: draft.createdAtISO,
+            notes: "",
             snapshot: AnyCodable.wrapDictionary(draft.snapshot)
         )
 
@@ -663,7 +702,7 @@ final class CatalogState: ObservableObject {
         showToast("State restored to \(clockString(from: positionMs))")
     }
 
-    func exportReplayMoment(snapshot: [String: Any], name: String, positionMs: Double) {
+    func exportReplayMoment(snapshot: [String: Any], name: String, positionMs: Double, notes: String = "") {
         guard !snapshot.isEmpty else {
             showToast("No state available at this moment")
             return
@@ -684,6 +723,7 @@ final class CatalogState: ObservableObject {
             id: "preset_\(shortID)",
             name: trimmedName.isEmpty ? fallbackName : trimmedName,
             createdAt: iso,
+            notes: notes,
             snapshot: AnyCodable.wrapDictionary(snapshot)
         )
 
@@ -873,11 +913,15 @@ final class CatalogState: ObservableObject {
             return
         }
 
+        document.replays.removeAll { $0.replayID == log.replayID }
+        document.replays.insert(log, at: 0)
         document.eventLog = log
         documentsBySessionID[targetID] = document
         store.saveSessionDocument(document)
 
         if selectedSessionID == targetID {
+            replays = mergeReplays(from: document)
+            selectedReplayID = log.replayID
             eventLog = log
         }
     }
@@ -911,6 +955,19 @@ final class CatalogState: ObservableObject {
         documentsBySessionID[selectedSessionID] = document
         store.saveSessionDocument(document)
         refreshSessionIndex(selecting: selectedSessionID)
+    }
+
+    private func mergeReplays(from document: SessionDocument) -> [EventLogRecord] {
+        var merged = document.replays
+        if let eventLog = document.eventLog,
+           !merged.contains(where: { $0.replayID == eventLog.replayID })
+        {
+            merged.insert(eventLog, at: 0)
+        }
+
+        return merged.sorted { lhs, rhs in
+            lhs.startedAt > rhs.startedAt
+        }
     }
 
     private func inferMediaKind(from extensionValue: String) -> String {

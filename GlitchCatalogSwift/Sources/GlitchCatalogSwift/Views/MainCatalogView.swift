@@ -531,7 +531,10 @@ struct MainCatalogView: View {
                     : "Open session replay")
 
                 presetsSection
-                    .frame(height: 240)
+                    .frame(height: 180)
+
+                replaysSection
+                    .frame(height: 170)
             }
         }
     }
@@ -596,6 +599,71 @@ struct MainCatalogView: View {
         }
     }
 
+    private var replaysSection: some View {
+        RetroPanel(title: "Replays", theme: theme) {
+            if state.replays.isEmpty {
+                Text("No replays yet")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(6)
+                    .background(theme.panelInner)
+                    .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(state.replays, id: \.replayID) { replay in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Button {
+                                    state.selectReplay(replay.replayID)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(replay.sessionName)
+                                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                            .lineLimit(1)
+                                        Text(state.prettyTimestamp(replay.startedAt))
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.muted)
+                                        Text("dur \(state.clockString(from: ReplayEngine.durationMs(from: replay))) • events \(replay.events.count)")
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(theme.muted)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(5)
+                                }
+                                .buttonStyle(.plain)
+                                .background(state.selectedReplayID == replay.replayID ? theme.selection : theme.panelInner)
+                                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+
+                                HStack(spacing: 6) {
+                                    Button("Load") {
+                                        state.selectReplay(replay.replayID)
+                                    }
+                                    .buttonStyle(RetroButtonStyle(theme: theme))
+
+                                    Button("Open") {
+                                        state.selectReplay(replay.replayID)
+                                        showingReplaySheet = true
+                                    }
+                                    .buttonStyle(RetroButtonStyle(theme: theme))
+                                    .disabled(ReplayEngine.durationMs(from: replay) <= 0)
+
+                                    Button("Delete") {
+                                        state.deleteReplay(replay.replayID)
+                                    }
+                                    .buttonStyle(RetroButtonStyle(theme: theme))
+                                }
+                            }
+                        }
+                    }
+                    .padding(2)
+                }
+                .background(theme.panelInner)
+                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+            }
+        }
+    }
+
     private var mainGrid: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
@@ -634,6 +702,13 @@ struct MainCatalogView: View {
                         Text("Captured: \(state.prettyTimestamp(preset.createdAt))")
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(theme.accent)
+
+                        if !preset.notes.isEmpty {
+                            Text(preset.notes)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(theme.muted)
+                                .lineLimit(4)
+                        }
 
                         ScrollView {
                             Text(state.presetDetailsText(preset))
@@ -1534,12 +1609,33 @@ private struct ReplaySessionSheet: View {
                 .buttonStyle(RetroButtonStyle(theme: theme))
                 .frame(width: 60)
 
+                Button("-10s") {
+                    positionMs = max(0, positionMs - 10_000)
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 70)
+
                 Button("▶▶") {
                     guard totalDurationMs > 0 else { return }
                     positionMs = min(totalDurationMs, positionMs + 10_000)
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
                 .frame(width: 60)
+
+                Button("+10s") {
+                    guard totalDurationMs > 0 else { return }
+                    positionMs = min(totalDurationMs, positionMs + 10_000)
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 70)
+
+                Button("Last Snap") {
+                    guard let snap = lastSnapshotPositionMs else { return }
+                    positionMs = snap
+                }
+                .buttonStyle(RetroButtonStyle(theme: theme))
+                .frame(width: 90)
+                .disabled(lastSnapshotPositionMs == nil)
 
                 Spacer()
 
@@ -1598,6 +1694,26 @@ private struct ReplaySessionSheet: View {
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(theme.muted)
 
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Event Stream")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.strongText)
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(timeline.suffix(180)) { event in
+                            Text("\(state.clockString(from: event.relativeMs))  [\(event.entry.type)]  \(event.entry.summary)")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(eventColor(for: event.entry.type))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .frame(height: 120)
+                .background(theme.panelInner)
+                .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
+            }
+
             HStack(spacing: 8) {
                 Button("Replay to Hardware") {
                     state.replaySnapshotToHardware(moment.snapshot, at: positionMs)
@@ -1648,10 +1764,19 @@ private struct ReplaySessionSheet: View {
             ReplayExportSheet(
                 defaultName: exportName,
                 onSave: { name in
-                    state.exportReplayMoment(snapshot: moment.snapshot, name: name, positionMs: positionMs)
+                    state.exportReplayMoment(
+                        snapshot: moment.snapshot,
+                        name: name,
+                        positionMs: positionMs,
+                        notes: replayExportNotes()
+                    )
                 }
             )
         }
+    }
+
+    private var lastSnapshotPositionMs: Double? {
+        timeline.reversed().first(where: { isSnapshotEvent($0) })?.relativeMs
     }
 
     private func nextEventDescription() -> String {
@@ -1660,6 +1785,43 @@ private struct ReplaySessionSheet: View {
         }
         let delta = max(0, next.relativeMs - positionMs)
         return "Next event: \(next.entry.summary) (in \(state.clockString(from: delta)))"
+    }
+
+    private func eventColor(for type: String) -> Color {
+        if type.contains("error") {
+            return .red
+        }
+        if type.contains("scene_save") {
+            return .orange
+        }
+        if type.contains("scene_recall") {
+            return .pink
+        }
+        if type.contains("recording") {
+            return .yellow
+        }
+        if type.contains("state_update") {
+            return theme.accent
+        }
+        return theme.text
+    }
+
+    private func isSnapshotEvent(_ event: ReplayTimelineEvent) -> Bool {
+        event.entry.type.contains("scene_save")
+            || event.entry.summary.lowercased().contains("snapshot")
+    }
+
+    private func replayExportNotes() -> String {
+        let last = moment.lastEvent?.entry.summary ?? "None"
+        let next = moment.nextEvent?.entry.summary ?? "End of session"
+        return [
+            "Replay Export",
+            "Session: \(session.title)",
+            "Position: \(state.clockString(from: positionMs)) / \(state.clockString(from: totalDurationMs))",
+            "Last event: \(last)",
+            "Next event: \(next)",
+            "Exported at: \(state.prettyTimestamp(ISO8601DateFormatter().string(from: Date())))",
+        ].joined(separator: "\n")
     }
 }
 

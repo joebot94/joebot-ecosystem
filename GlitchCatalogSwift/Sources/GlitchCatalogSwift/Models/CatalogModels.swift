@@ -211,10 +211,45 @@ struct PresetRecord: Codable, Identifiable, Hashable {
     var id: String
     var name: String
     var createdAt: String
+    var notes: String
     var snapshot: [String: AnyCodable]
 
     var capturedClients: [String] {
         snapshot.keys.sorted()
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case createdAt
+        case notes
+        case snapshot
+    }
+
+    init(id: String, name: String, createdAt: String, notes: String = "", snapshot: [String: AnyCodable]) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.notes = notes
+        self.snapshot = snapshot
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        snapshot = try container.decodeIfPresent([String: AnyCodable].self, forKey: .snapshot) ?? [:]
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(snapshot, forKey: .snapshot)
     }
 }
 
@@ -254,6 +289,10 @@ struct EventLogRecord: Codable, Hashable {
         case stoppedAt = "stopped_at"
         case events
     }
+
+    var replayID: String {
+        "\(sessionID)|\(startedAt)|\(stoppedAt ?? "")"
+    }
 }
 
 // One .jbt file contains one session plus its attached entities.
@@ -267,6 +306,7 @@ struct SessionDocument: Codable {
     var media: [MediaRecord]
     var presets: [PresetRecord]
     var eventLog: EventLogRecord?
+    var replays: [EventLogRecord]
 
     enum CodingKeys: String, CodingKey {
         case jbtType = "jbt_type"
@@ -278,6 +318,7 @@ struct SessionDocument: Codable {
         case media
         case presets
         case eventLog = "event_log"
+        case replays
     }
 
     init(
@@ -289,7 +330,8 @@ struct SessionDocument: Codable {
         sessionGear: [SessionGearRecord],
         media: [MediaRecord],
         presets: [PresetRecord] = [],
-        eventLog: EventLogRecord? = nil
+        eventLog: EventLogRecord? = nil,
+        replays: [EventLogRecord] = []
     ) {
         self.jbtType = jbtType
         self.name = name
@@ -300,6 +342,7 @@ struct SessionDocument: Codable {
         self.media = media
         self.presets = presets
         self.eventLog = eventLog
+        self.replays = replays
     }
 
     init(from decoder: Decoder) throws {
@@ -311,6 +354,10 @@ struct SessionDocument: Codable {
         media = try container.decodeIfPresent([MediaRecord].self, forKey: .media) ?? []
         presets = try container.decodeIfPresent([PresetRecord].self, forKey: .presets) ?? []
         eventLog = try container.decodeIfPresent(EventLogRecord.self, forKey: .eventLog)
+        replays = try container.decodeIfPresent([EventLogRecord].self, forKey: .replays) ?? []
+        if replays.isEmpty, let eventLog {
+            replays = [eventLog]
+        }
         jbtType = try container.decodeIfPresent(String.self, forKey: .jbtType) ?? "glitch_session"
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? session.title
     }
@@ -326,6 +373,7 @@ struct SessionDocument: Codable {
         try container.encode(media, forKey: .media)
         try container.encode(presets, forKey: .presets)
         try container.encode(eventLog, forKey: .eventLog)
+        try container.encode(replays, forKey: .replays)
     }
 }
 
