@@ -9,14 +9,12 @@ import UniformTypeIdentifiers
 final class GlitchBoardState: NSObject, ObservableObject {
     @Published var bpm: Double = 140
     @Published var audioDuration: Double = 0
-    @Published var playheadTime: Double = 0
     @Published var waveform: [Float] = []
     @Published var cues: [TimelineCue] = []
     @Published var selectedCueID: UUID?
     @Published var selectedCueLabelDraft = ""
     @Published var selectedAudioFileName = "No audio loaded"
     @Published var statusText = "Load a song to start building cues."
-    @Published var isPlaying = false
     @Published var zoomScale: CGFloat = 1
     @Published var timelineViewportWidth: CGFloat = 1
     @Published var lanes: [CueLane] = GlitchBoardState.placeholderLanes
@@ -28,6 +26,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     @Published var lastCapabilitiesRefreshAt: Date?
 
     let nexusClient: NexusClient
+    let playheadState = PlayheadState()
 
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioURL: URL?
@@ -50,6 +49,20 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private let dispatchStatusMinInterval: TimeInterval = 0.25
     private let capabilitiesPollInterval: TimeInterval = 3.0
     private let capabilityBootstrapQueryEnabled = true
+    private let rangeDispatchQueue = DispatchQueue(label: "glitchboard.range.dispatch", qos: .userInitiated)
+
+    private struct RangeAutomationSnapshot {
+        let cueID: UUID
+        let label: String
+        let laneID: String
+        let actionID: String
+        let startTime: Double
+        let endTime: Double
+        let interpolation: CueInterpolation
+        let params: [String: Double]
+        let startParams: [String: Double]
+        let endParams: [String: Double]
+    }
 
     private struct DeviceCapabilityInfo {
         var model: String?
@@ -399,12 +412,16 @@ final class GlitchBoardState: NSObject, ObservableObject {
         audioDuration > 0
     }
 
+    var isPlaying: Bool {
+        playheadState.isPlaying
+    }
+
     var totalCueCount: Int {
         cues.count
     }
 
     var currentAudioTimeSeconds: Double {
-        audioPlayer?.currentTime ?? playheadTime
+        audioPlayer?.currentTime ?? playheadState.playheadTime
     }
 
     var totalAudioDurationSeconds: Double {
@@ -667,7 +684,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
             loadedAudioURL = url
             audioDuration = player.duration
-            playheadTime = 0
+            playheadState.playheadTime = 0
+            playheadState.isPlaying = false
             selectedAudioFileName = url.lastPathComponent
             selectCue(nil)
             clearScheduledDispatchState()
@@ -692,15 +710,15 @@ final class GlitchBoardState: NSObject, ObservableObject {
             return
         }
 
-        if playheadTime >= audioDuration - 0.001 {
+        if playheadState.playheadTime >= audioDuration - 0.001 {
             audioPlayer.currentTime = 0
-            playheadTime = 0
+            playheadState.playheadTime = 0
             clearScheduledDispatchState()
         }
 
         guard !audioPlayer.isPlaying else { return }
         audioPlayer.play()
-        isPlaying = true
+        playheadState.isPlaying = true
         startPlayheadTimer()
         startSchedulerTimer()
         statusText = "Playing \(selectedAudioFileName)"
@@ -709,7 +727,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     func pause() {
         guard let audioPlayer, audioPlayer.isPlaying else { return }
         audioPlayer.pause()
-        isPlaying = false
+        playheadState.isPlaying = false
         stopPlayheadTimer()
         stopSchedulerTimer()
         clearScheduledDispatchState()
@@ -721,8 +739,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
             audioPlayer.stop()
             audioPlayer.currentTime = 0
         }
-        isPlaying = false
-        playheadTime = 0
+        playheadState.isPlaying = false
+        playheadState.playheadTime = 0
         stopPlayheadTimer()
         stopSchedulerTimer()
         clearScheduledDispatchState()
@@ -1081,6 +1099,18 @@ final class GlitchBoardState: NSObject, ObservableObject {
             case .range:
                 guard let endTime = cue.endTime else { continue }
                 guard endTime >= now, cue.time <= windowEnd else { continue }
+                let snapshot = RangeAutomationSnapshot(
+                    cueID: cue.id,
+                    label: cue.label,
+                    laneID: cue.laneID,
+                    actionID: cue.actionID,
+                    startTime: cue.time,
+                    endTime: endTime,
+                    interpolation: cue.interpolation,
+                    params: cue.params,
+                    startParams: cue.startParams,
+                    endParams: cue.endParams
+                )
 
                 var sampleTime = max(now, cue.time)
                 while sampleTime <= min(endTime, windowEnd) + 0.0001 {
@@ -1093,20 +1123,16 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
                     scheduledRangeBuckets.insert(bucketKey)
                     let dispatchDelay = max(0, sampleTime - now)
-                    let cueID = cue.id
                     let laneTarget = lane.target
                     let laneName = lane.name
                     let dispatchTime = sampleTime
-                    DispatchQueue.main.asyncAfter(deadline: .now() + dispatchDelay) { [weak self] in
-                        Task { @MainActor [weak self] in
-                            self?.dispatchRangeStep(
-                                cueID: cueID,
-                                laneTarget: laneTarget,
-                                laneName: laneName,
-                                atTime: dispatchTime
-                            )
-                        }
-                    }
+                    scheduleRangeDispatch(
+                        snapshot: snapshot,
+                        laneTarget: laneTarget,
+                        laneName: laneName,
+                        dispatchTime: dispatchTime,
+                        delay: dispatchDelay
+                    )
 
                     sampleTime += rangeAutomationStep
                 }
@@ -1129,15 +1155,62 @@ final class GlitchBoardState: NSObject, ObservableObject {
         updateDispatchStatus("Fired \(cue.label) on \(lane.name)")
     }
 
-    private func dispatchRangeStep(cueID: UUID, laneTarget: String, laneName: String, atTime playbackTime: Double) {
-        guard let cue = cues.first(where: { $0.id == cueID }) else { return }
-        guard cue.kind == .range, !cue.muted else { return }
-        guard let endTime = cue.endTime, endTime > cue.time else { return }
-        guard playbackTime >= cue.time, playbackTime <= endTime + 0.0001 else { return }
+    private func scheduleRangeDispatch(
+        snapshot: RangeAutomationSnapshot,
+        laneTarget: String,
+        laneName: String,
+        dispatchTime: Double,
+        delay: TimeInterval
+    ) {
+        rangeDispatchQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            guard let prepared = Self.prepareRangeDispatch(snapshot: snapshot, playbackTime: dispatchTime) else { return }
+            Task { @MainActor [weak self] in
+                self?.performRangeDispatch(
+                    snapshot: snapshot,
+                    laneTarget: laneTarget,
+                    laneName: laneName,
+                    playbackTime: dispatchTime,
+                    prepared: prepared
+                )
+            }
+        }
+    }
 
-        let progress = min(max((playbackTime - cue.time) / (endTime - cue.time), 0), 1)
+    private func performRangeDispatch(
+        snapshot: RangeAutomationSnapshot,
+        laneTarget: String,
+        laneName: String,
+        playbackTime: Double,
+        prepared: (values: [String: Double], progress: Double)
+    ) {
+        guard let cue = cues.first(where: { $0.id == snapshot.cueID }) else { return }
+        guard cue.kind == .range, !cue.muted else { return }
+        guard let cueEnd = cue.endTime, cueEnd > cue.time else { return }
+        guard playbackTime >= cue.time, playbackTime <= cueEnd + 0.0001 else { return }
+
+        var payload: [String: Any] = serializeParamsForDispatch(cue: cue, rawValues: prepared.values)
+        payload["cue_id"] = cue.id.uuidString
+        payload["label"] = cue.label
+        payload["interpolation"] = cue.interpolation.rawValue
+        payload["progress"] = prepared.progress
+        payload["type"] = cue.kind.rawValue
+        payload["bar_beat"] = barBeatString(for: playbackTime)
+
+        nexusClient.sendIntent(targets: [laneTarget], action: cue.actionID, params: payload)
+        updateDispatchStatus("Automating \(cue.label) on \(laneName)")
+    }
+
+    nonisolated private static func prepareRangeDispatch(
+        snapshot: RangeAutomationSnapshot,
+        playbackTime: Double
+    ) -> (values: [String: Double], progress: Double)? {
+        guard snapshot.endTime > snapshot.startTime else { return nil }
+        guard playbackTime >= snapshot.startTime, playbackTime <= snapshot.endTime + 0.0001 else { return nil }
+
+        let progress = min(max((playbackTime - snapshot.startTime) / (snapshot.endTime - snapshot.startTime), 0), 1)
         let curveProgress: Double
-        switch cue.interpolation {
+        switch snapshot.interpolation {
         case .linear:
             curveProgress = progress
         case .step:
@@ -1147,22 +1220,13 @@ final class GlitchBoardState: NSObject, ObservableObject {
         }
 
         var interpolatedValues: [String: Double] = [:]
-        let keys = Set(cue.startParams.keys).union(cue.endParams.keys).union(cue.params.keys)
+        let keys = Set(snapshot.startParams.keys).union(snapshot.endParams.keys).union(snapshot.params.keys)
         for key in keys {
-            let startValue = cue.startParams[key] ?? cue.params[key] ?? 0
-            let endValue = cue.endParams[key] ?? cue.params[key] ?? startValue
+            let startValue = snapshot.startParams[key] ?? snapshot.params[key] ?? 0
+            let endValue = snapshot.endParams[key] ?? snapshot.params[key] ?? startValue
             interpolatedValues[key] = startValue + (endValue - startValue) * curveProgress
         }
-        var payload: [String: Any] = serializeParamsForDispatch(cue: cue, rawValues: interpolatedValues)
-        payload["cue_id"] = cue.id.uuidString
-        payload["label"] = cue.label
-        payload["interpolation"] = cue.interpolation.rawValue
-        payload["progress"] = curveProgress
-        payload["type"] = cue.kind.rawValue
-        payload["bar_beat"] = barBeatString(for: playbackTime)
-
-        nexusClient.sendIntent(targets: [laneTarget], action: cue.actionID, params: payload)
-        updateDispatchStatus("Automating \(cue.label) on \(laneName)")
+        return (interpolatedValues, curveProgress)
     }
 
     private func updateDispatchStatus(_ message: String) {
@@ -1183,10 +1247,10 @@ final class GlitchBoardState: NSObject, ObservableObject {
             audioDuration = totalDuration
         }
         let current = min(totalDuration, audioPlayer.currentTime)
-        playheadTime = current
+        playheadState.playheadTime = current
 
         if !audioPlayer.isPlaying, current >= totalDuration - 0.001 {
-            isPlaying = false
+            playheadState.isPlaying = false
             stopPlayheadTimer()
             stopSchedulerTimer()
             clearScheduledDispatchState()
@@ -1212,7 +1276,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
         loadedAudioURL = nil
         waveform = []
         audioDuration = 0
-        playheadTime = 0
+        playheadState.playheadTime = 0
+        playheadState.isPlaying = false
         selectedAudioFileName = "No audio loaded"
     }
 

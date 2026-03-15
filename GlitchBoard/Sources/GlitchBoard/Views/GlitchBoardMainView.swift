@@ -22,7 +22,7 @@ struct GlitchBoardMainView: View {
                     .frame(width: 320)
             }
 
-            statusStrip
+            StatusStripView(state: state, playhead: state.playheadState, selectedCueLabelBinding: selectedCueLabelBinding)
         }
         .padding(16)
         .background(GlitchBoardTheme.background.ignoresSafeArea())
@@ -166,11 +166,27 @@ struct GlitchBoardMainView: View {
 
             ScrollView(.horizontal) {
                 VStack(alignment: .leading, spacing: 8) {
-                    BarBeatRulerView(state: state, contentWidth: state.timelineContentWidth)
-                    WaveformView(state: state, contentWidth: state.timelineContentWidth)
+                    BarBeatRulerView(
+                        audioDuration: state.audioDuration,
+                        beatDuration: state.beatDuration,
+                        contentWidth: state.timelineContentWidth,
+                        playhead: state.playheadState
+                    )
+                    WaveformView(
+                        waveform: state.waveform,
+                        audioDuration: state.audioDuration,
+                        beatDuration: state.beatDuration,
+                        contentWidth: state.timelineContentWidth,
+                        playhead: state.playheadState
+                    )
 
                     ForEach(state.lanes) { lane in
-                        CueLaneRowView(state: state, lane: lane, contentWidth: state.timelineContentWidth)
+                        CueLaneRowView(
+                            state: state,
+                            lane: lane,
+                            contentWidth: state.timelineContentWidth,
+                            playhead: state.playheadState
+                        )
                     }
                 }
                 .frame(width: state.timelineContentWidth, alignment: .leading)
@@ -192,7 +208,20 @@ struct GlitchBoardMainView: View {
         )
     }
 
-    private var statusStrip: some View {
+    private var selectedCueLabelBinding: Binding<String> {
+        Binding(
+            get: { state.selectedCueLabelDraft },
+            set: { state.updateSelectedCueLabel($0) }
+        )
+    }
+}
+
+private struct StatusStripView: View {
+    @ObservedObject var state: GlitchBoardState
+    @ObservedObject var playhead: PlayheadState
+    let selectedCueLabelBinding: Binding<String>
+
+    var body: some View {
         HStack(spacing: 12) {
             Text("Snap:")
                 .foregroundStyle(.secondary)
@@ -204,7 +233,7 @@ struct GlitchBoardMainView: View {
 
             Text("Pos:")
                 .foregroundStyle(.secondary)
-            Text(state.currentSongPositionString)
+            Text(formatClock(playhead.playheadTime))
                 .font(.system(.callout, design: .monospaced))
 
             Divider()
@@ -252,7 +281,7 @@ struct GlitchBoardMainView: View {
 
             Spacer()
 
-            Text(state.songProgressDetail())
+            Text("\(formatClock(playhead.playheadTime)) / \(formatClock(state.totalAudioDurationSeconds))")
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.secondary)
 
@@ -269,11 +298,11 @@ struct GlitchBoardMainView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    private var selectedCueLabelBinding: Binding<String> {
-        Binding(
-            get: { state.selectedCueLabelDraft },
-            set: { state.updateSelectedCueLabel($0) }
-        )
+    private func formatClock(_ time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "00:00.0" }
+        let minutes = Int(time / 60)
+        let seconds = time - Double(minutes * 60)
+        return String(format: "%02d:%04.1f", minutes, seconds)
     }
 }
 
@@ -606,8 +635,8 @@ private struct TrackGridOverlayView: View {
 }
 
 private struct PlayheadOverlayView: View {
+    @ObservedObject var playhead: PlayheadState
     let duration: Double
-    let playheadTime: Double
 
     var body: some View {
         GeometryReader { proxy in
@@ -616,7 +645,7 @@ private struct PlayheadOverlayView: View {
                     .fill(GlitchBoardTheme.accent)
                     .frame(width: 2, height: proxy.size.height)
                     .position(
-                        x: min(max(0, CGFloat(playheadTime / duration) * proxy.size.width), proxy.size.width),
+                        x: min(max(0, CGFloat(playhead.playheadTime / duration) * proxy.size.width), proxy.size.width),
                         y: proxy.size.height / 2
                     )
             }
@@ -626,12 +655,14 @@ private struct PlayheadOverlayView: View {
 }
 
 private struct BarBeatRulerView: View {
-    @ObservedObject var state: GlitchBoardState
+    let audioDuration: Double
+    let beatDuration: Double
     let contentWidth: CGFloat
+    let playhead: PlayheadState
 
     var body: some View {
         Canvas { context, size in
-            guard state.audioDuration > 0 else {
+            guard audioDuration > 0 else {
                 context.draw(
                     Text("Load audio to display bars and beats")
                         .font(.caption)
@@ -641,11 +672,12 @@ private struct BarBeatRulerView: View {
                 return
             }
 
-            let beatCount = max(1, Int(ceil(state.audioDuration / state.beatDuration)))
+            let beatCount = max(1, Int(ceil(audioDuration / beatDuration)))
             let totalBars = max(1, Int(ceil(Double(beatCount) / 4)))
+            let barPixelWidth = size.width / CGFloat(totalBars)
 
             for beat in 0 ... beatCount {
-                let x = CGFloat(Double(beat) * state.beatDuration / state.audioDuration) * size.width
+                let x = CGFloat(Double(beat) * beatDuration / audioDuration) * size.width
                 let beatInBar = beat % 4
                 let isBarStart = beatInBar == 0
 
@@ -667,11 +699,7 @@ private struct BarBeatRulerView: View {
             }
 
             for bar in 0 ..< totalBars {
-                let barStartBeat = Double(bar * 4)
-                let barEndBeat = min(Double((bar + 1) * 4), Double(beatCount))
-                let xStart = CGFloat((barStartBeat * state.beatDuration) / state.audioDuration) * size.width
-                let xEnd = CGFloat((barEndBeat * state.beatDuration) / state.audioDuration) * size.width
-                let xCenter = (xStart + xEnd) * 0.5
+                let xCenter = (CGFloat(bar) * barPixelWidth) + (barPixelWidth * 0.5)
                 context.draw(
                     Text("\(bar + 1)")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -685,59 +713,71 @@ private struct BarBeatRulerView: View {
         .background(GlitchBoardTheme.elevatedSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
-            PlayheadOverlayView(duration: state.audioDuration, playheadTime: state.playheadTime)
+            PlayheadOverlayView(playhead: playhead, duration: audioDuration)
         )
     }
 }
 
+private struct WaveformStaticLayerView: View {
+    let waveform: [Float]
+
+    var body: some View {
+        Canvas { context, size in
+            guard !waveform.isEmpty else {
+                context.draw(
+                    Text("Waveform appears here").font(.caption).foregroundColor(.secondary),
+                    at: CGPoint(x: size.width / 2, y: size.height / 2)
+                )
+                return
+            }
+
+            let midY = size.height / 2
+            let stepX = size.width / CGFloat(max(waveform.count - 1, 1))
+            var path = Path()
+            path.move(to: CGPoint(x: 0, y: midY))
+
+            for index in waveform.indices {
+                let magnitude = CGFloat(waveform[index]) * (size.height * 0.44)
+                let x = CGFloat(index) * stepX
+                path.addLine(to: CGPoint(x: x, y: midY - magnitude))
+            }
+
+            for index in waveform.indices.reversed() {
+                let magnitude = CGFloat(waveform[index]) * (size.height * 0.44)
+                let x = CGFloat(index) * stepX
+                path.addLine(to: CGPoint(x: x, y: midY + magnitude))
+            }
+
+            path.closeSubpath()
+            context.fill(path, with: .color(GlitchBoardTheme.waveform.opacity(0.80)))
+            context.stroke(path, with: .color(GlitchBoardTheme.waveform), lineWidth: 1)
+        }
+        .drawingGroup()
+    }
+}
+
 private struct WaveformView: View {
-    @ObservedObject var state: GlitchBoardState
+    let waveform: [Float]
+    let audioDuration: Double
+    let beatDuration: Double
     let contentWidth: CGFloat
+    let playhead: PlayheadState
 
     var body: some View {
         ZStack {
             GlitchBoardTheme.elevatedSurface
             TrackGridOverlayView(
-                duration: state.audioDuration,
-                beatDuration: state.beatDuration
+                duration: audioDuration,
+                beatDuration: beatDuration
             )
 
-            Canvas { context, size in
-                guard !state.waveform.isEmpty else {
-                    context.draw(
-                        Text("Waveform appears here").font(.caption).foregroundColor(.secondary),
-                        at: CGPoint(x: size.width / 2, y: size.height / 2)
-                    )
-                    return
-                }
-
-                let midY = size.height / 2
-                let stepX = size.width / CGFloat(max(state.waveform.count - 1, 1))
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: midY))
-
-                for index in state.waveform.indices {
-                    let magnitude = CGFloat(state.waveform[index]) * (size.height * 0.44)
-                    let x = CGFloat(index) * stepX
-                    path.addLine(to: CGPoint(x: x, y: midY - magnitude))
-                }
-
-                for index in state.waveform.indices.reversed() {
-                    let magnitude = CGFloat(state.waveform[index]) * (size.height * 0.44)
-                    let x = CGFloat(index) * stepX
-                    path.addLine(to: CGPoint(x: x, y: midY + magnitude))
-                }
-
-                path.closeSubpath()
-                context.fill(path, with: .color(GlitchBoardTheme.waveform.opacity(0.80)))
-                context.stroke(path, with: .color(GlitchBoardTheme.waveform), lineWidth: 1)
-            }
-            .padding(.horizontal, 2)
+            WaveformStaticLayerView(waveform: waveform)
+                .padding(.horizontal, 2)
         }
         .frame(width: contentWidth, height: 240)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
-            PlayheadOverlayView(duration: state.audioDuration, playheadTime: state.playheadTime)
+            PlayheadOverlayView(playhead: playhead, duration: audioDuration)
         )
     }
 }
@@ -746,6 +786,7 @@ private struct CueLaneRowView: View {
     @ObservedObject var state: GlitchBoardState
     let lane: CueLane
     let contentWidth: CGFloat
+    let playhead: PlayheadState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -816,7 +857,7 @@ private struct CueLaneRowView: View {
                     .stroke(laneAccentColor.opacity(0.28), lineWidth: 1)
             )
             .overlay(
-                PlayheadOverlayView(duration: state.audioDuration, playheadTime: state.playheadTime)
+                PlayheadOverlayView(playhead: playhead, duration: state.audioDuration)
             )
         }
     }
