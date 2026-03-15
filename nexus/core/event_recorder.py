@@ -92,17 +92,35 @@ class EventRecorder:
         self._persist(session)
         return session
 
-    def record_event(self, event_type: str, source: str, summary: str, payload: dict[str, Any] | None = None) -> None:
+    def record_event(
+        self,
+        event_type: str,
+        source: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        session_ids: set[str] | None = None,
+        relative_ms: int | None = None,
+        timestamp: str | None = None,
+    ) -> None:
         if not self.active_sessions:
             return
 
-        timestamp = _iso_now_ms()
-        timestamp_epoch = _parse_iso_timestamp(timestamp) or 0.0
-        for session in list(self.active_sessions.values()):
-            relative_ms = int(max(0.0, (timestamp_epoch - session.started_at_epoch) * 1000.0))
+        entry_timestamp = timestamp or _iso_now_ms()
+        timestamp_epoch = _parse_iso_timestamp(entry_timestamp) or 0.0
+        sessions = list(self.active_sessions.values())
+        if session_ids is not None:
+            sessions = [session for session in sessions if session.session_id in session_ids]
+
+        for session in sessions:
+            entry_relative_ms = (
+                max(0, int(relative_ms))
+                if relative_ms is not None
+                else int(max(0.0, (timestamp_epoch - session.started_at_epoch) * 1000.0))
+            )
             entry = EventEntry(
-                timestamp=timestamp,
-                relative_ms=relative_ms,
+                timestamp=entry_timestamp,
+                relative_ms=entry_relative_ms,
                 type=event_type,
                 source=source,
                 summary=summary,

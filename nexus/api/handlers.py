@@ -327,6 +327,7 @@ class NexusHandlers:
         requester_source: str,
         request_id_prefix: str,
         include_offline: bool,
+        timeout_seconds: float = 2.0,
     ) -> dict[str, Any]:
         targets = [
             record
@@ -359,7 +360,7 @@ class NexusHandlers:
             target_id = target_record.client_id
             future = futures[target_id]
             try:
-                payload = await asyncio.wait_for(future, timeout=2)
+                payload = await asyncio.wait_for(future, timeout=timeout_seconds)
                 client_state = payload.get("state", {})
             except asyncio.TimeoutError:
                 client_state = self.runtime.state_store.get_state(target_id)
@@ -435,8 +436,9 @@ class NexusHandlers:
         )
 
     async def _handle_recording_start(self, websocket: WebSocketServerProtocol, message: RecordingStartMessage) -> None:
+        session_id = message.payload.session_id
         session = self.runtime.event_recorder.start_recording(
-            session_id=message.payload.session_id,
+            session_id=session_id,
             session_name=message.payload.session_name,
         )
         self.runtime.record_event(
@@ -461,10 +463,29 @@ class NexusHandlers:
             source=message.source,
         )
 
+        cached_baseline: dict[str, dict[str, Any]] = {}
+        for record in self.runtime.registry.online_records():
+            if record.client_type == "monitor":
+                continue
+            current_state = self.runtime.state_store.get_state(record.client_id)
+            if not isinstance(current_state, dict) or not current_state:
+                continue
+            cached_baseline[record.client_id] = current_state
+            self.runtime.event_recorder.record_event(
+                event_type="state_update",
+                source=record.client_id,
+                summary="Baseline state captured at recording start",
+                payload={"state": current_state, "baseline": True, "capture": "cache"},
+                session_ids={session_id},
+                relative_ms=0,
+                timestamp=session.started_at,
+            )
+
         baseline_snapshot = await self._collect_snapshot_from_clients(
             requester_source=message.source,
             request_id_prefix=f"recstart_{uuid4().hex[:12]}",
             include_offline=False,
+            timeout_seconds=0.35,
         )
         captured_clients: list[str] = []
         for client_id, client_state in baseline_snapshot.items():
@@ -472,17 +493,22 @@ class NexusHandlers:
                 continue
             captured_clients.append(client_id)
             self.runtime.state_store.set_state(client_id, client_state)
-            self.runtime.record_event(
+            if cached_baseline.get(client_id) == client_state:
+                continue
+            self.runtime.event_recorder.record_event(
                 event_type="state_update",
                 source=client_id,
                 summary="Baseline state captured at recording start",
-                payload={"state": client_state, "baseline": True},
+                payload={"state": client_state, "baseline": True, "capture": "poll"},
+                session_ids={session_id},
+                relative_ms=0,
+                timestamp=session.started_at,
             )
 
         self.runtime.log_bus.log(
             "info",
             "Recording baseline captured",
-            session_id=message.payload.session_id,
+            session_id=session_id,
             clients=len(captured_clients),
             client_ids=captured_clients,
         )

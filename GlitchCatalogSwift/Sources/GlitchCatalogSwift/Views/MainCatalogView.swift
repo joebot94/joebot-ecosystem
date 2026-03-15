@@ -1523,8 +1523,10 @@ private struct ReplaySessionSheet: View {
     @State private var playbackSpeed: Double = 1.0
     @State private var showingExportSheet = false
     @State private var exportName = ""
+    @State private var momentState = ReplayMomentState(snapshot: [:], channels: [], lastEvent: nil, nextEvent: nil)
+    @State private var streamEvents: [ReplayTimelineEvent] = []
 
-    private let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
     private let speedOptions: [Double] = [0.5, 1.0, 2.0, 4.0]
 
     private var totalDurationMs: Double {
@@ -1532,10 +1534,6 @@ private struct ReplaySessionSheet: View {
             return 0
         }
         return last
-    }
-
-    private var moment: ReplayMomentState {
-        ReplayEngine.reconstruct(at: positionMs, timeline: timeline)
     }
 
     private var progressPercent: Double {
@@ -1660,14 +1658,14 @@ private struct ReplaySessionSheet: View {
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(theme.strongText)
 
-                if moment.channels.isEmpty {
+                if momentState.channels.isEmpty {
                     Text("No DirtyMixer state available at this position")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(theme.muted)
                 } else {
-                    ForEach(Array(stride(from: 0, to: moment.channels.count, by: 3)), id: \.self) { startIndex in
-                        let endIndex = min(startIndex + 3, moment.channels.count)
-                        let line = moment.channels[startIndex ..< endIndex]
+                    ForEach(Array(stride(from: 0, to: momentState.channels.count, by: 3)), id: \.self) { startIndex in
+                        let endIndex = min(startIndex + 3, momentState.channels.count)
+                        let line = momentState.channels[startIndex ..< endIndex]
                             .map { "CH\($0.id) A:\($0.inputA ? 1 : 0) B:\($0.inputB ? 1 : 0) M:\($0.mix)" }
                             .joined(separator: "   ")
                         Text(line)
@@ -1680,11 +1678,11 @@ private struct ReplaySessionSheet: View {
             .background(theme.panelInner)
             .overlay(Rectangle().stroke(theme.border, lineWidth: 1))
 
-            Text("Last event: \(moment.lastEvent?.entry.summary ?? "None yet")")
+            Text("Last event: \(momentState.lastEvent?.entry.summary ?? "None yet")")
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(theme.strongText)
 
-            if let last = moment.lastEvent {
+            if let last = momentState.lastEvent {
                 Text("Event type: [\(last.entry.type)] from \(last.entry.source)")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(theme.muted)
@@ -1701,7 +1699,7 @@ private struct ReplaySessionSheet: View {
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 3) {
-                        ForEach(timeline.suffix(180)) { event in
+                        ForEach(streamEvents) { event in
                             Text("\(state.clockString(from: event.relativeMs))  [\(event.entry.type)]  \(event.entry.summary)")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(eventColor(for: event.entry.type))
@@ -1716,10 +1714,10 @@ private struct ReplaySessionSheet: View {
 
             HStack(spacing: 8) {
                 Button("Replay to Hardware") {
-                    state.replaySnapshotToHardware(moment.snapshot, at: positionMs)
+                    state.replaySnapshotToHardware(momentState.snapshot, at: positionMs)
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
-                .disabled(!state.nexusClient.isConnected || moment.snapshot.isEmpty)
+                .disabled(!state.nexusClient.isConnected || momentState.snapshot.isEmpty)
                 .help(state.nexusClient.isConnected
                     ? "Send reconstructed state at this moment to Nexus"
                     : "Connect to Nexus to replay to hardware")
@@ -1729,7 +1727,7 @@ private struct ReplaySessionSheet: View {
                     showingExportSheet = true
                 }
                 .buttonStyle(RetroButtonStyle(theme: theme))
-                .disabled(moment.snapshot.isEmpty)
+                .disabled(momentState.snapshot.isEmpty)
             }
         }
         .padding(14)
@@ -1737,12 +1735,17 @@ private struct ReplaySessionSheet: View {
         .background(theme.background)
         .onAppear {
             timeline = ReplayEngine.timeline(from: eventLog)
+            streamEvents = Array(timeline.suffix(120))
             if totalDurationMs <= 0 {
                 positionMs = 0
                 isPlaying = false
             } else if positionMs > totalDurationMs {
                 positionMs = totalDurationMs
             }
+            refreshMomentState()
+        }
+        .onChange(of: positionMs) { _, _ in
+            refreshMomentState()
         }
         .onReceive(timer) { _ in
             guard isPlaying else { return }
@@ -1755,7 +1758,7 @@ private struct ReplaySessionSheet: View {
                 isPlaying = false
                 return
             }
-            positionMs = min(totalDurationMs, positionMs + (50.0 * playbackSpeed))
+            positionMs = min(totalDurationMs, positionMs + (100.0 * playbackSpeed))
             if positionMs >= totalDurationMs {
                 isPlaying = false
             }
@@ -1765,7 +1768,7 @@ private struct ReplaySessionSheet: View {
                 defaultName: exportName,
                 onSave: { name in
                     state.exportReplayMoment(
-                        snapshot: moment.snapshot,
+                        snapshot: momentState.snapshot,
                         name: name,
                         positionMs: positionMs,
                         notes: replayExportNotes()
@@ -1775,12 +1778,16 @@ private struct ReplaySessionSheet: View {
         }
     }
 
+    private func refreshMomentState() {
+        momentState = ReplayEngine.reconstruct(at: positionMs, timeline: timeline)
+    }
+
     private var lastSnapshotPositionMs: Double? {
         timeline.reversed().first(where: { isSnapshotEvent($0) })?.relativeMs
     }
 
     private func nextEventDescription() -> String {
-        guard let next = moment.nextEvent else {
+        guard let next = momentState.nextEvent else {
             return "Next event: End of session"
         }
         let delta = max(0, next.relativeMs - positionMs)
@@ -1812,8 +1819,8 @@ private struct ReplaySessionSheet: View {
     }
 
     private func replayExportNotes() -> String {
-        let last = moment.lastEvent?.entry.summary ?? "None"
-        let next = moment.nextEvent?.entry.summary ?? "End of session"
+        let last = momentState.lastEvent?.entry.summary ?? "None"
+        let next = momentState.nextEvent?.entry.summary ?? "End of session"
         return [
             "Replay Export",
             "Session: \(session.title)",
