@@ -71,6 +71,22 @@ struct GlitchBoardMainView: View {
 
                 Divider()
 
+                Button {
+                    state.refreshCapabilitiesNow()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh Nexus Capabilities")
+
+                Button {
+                    state.toggleCapabilityPolling()
+                } label: {
+                    Image(systemName: state.capabilityPollingEnabled ? "dot.radiowaves.left.and.right.circle.fill" : "dot.radiowaves.left.and.right")
+                }
+                .help(state.capabilityPollingEnabled ? "Disable Capability Polling" : "Enable Capability Polling")
+
+                Divider()
+
                 NexusStatusIndicator(client: state.nexusClient)
             }
         }
@@ -189,6 +205,22 @@ struct GlitchBoardMainView: View {
             Text("Pos:")
                 .foregroundStyle(.secondary)
             Text(state.currentSongPositionString)
+                .font(.system(.callout, design: .monospaced))
+
+            Divider()
+                .frame(height: 16)
+
+            Text("Caps Poll:")
+                .foregroundStyle(.secondary)
+            Text(state.capabilityPollingStatus)
+                .font(.system(.callout, design: .monospaced))
+
+            Divider()
+                .frame(height: 16)
+
+            Text("Caps Refresh:")
+                .foregroundStyle(.secondary)
+            Text(state.lastCapabilitiesRefreshLabel)
                 .font(.system(.callout, design: .monospaced))
 
             Divider()
@@ -415,6 +447,9 @@ private struct CueEditorPanel: View {
         if param.valueType == .boolean {
             return "false/true"
         }
+        if param.valueType == .bitset {
+            return "\(max(1, param.bitCount))-bit mask"
+        }
         if !param.options.isEmpty {
             return "\(param.options.count) options"
         }
@@ -430,6 +465,10 @@ private struct CueEditorPanel: View {
         case .boolean:
             Toggle("", isOn: Binding(get: { value.wrappedValue >= 0.5 }, set: { value.wrappedValue = $0 ? 1 : 0 }))
                 .labelsHidden()
+        case .bitset:
+            TextField("", value: value, formatter: numberFormatter(for: param))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 92)
         case .option where !param.options.isEmpty:
             Picker("", selection: value) {
                 ForEach(param.options) { option in
@@ -451,6 +490,8 @@ private struct CueEditorPanel: View {
         case .boolean:
             Toggle("", isOn: Binding(get: { value.wrappedValue >= 0.5 }, set: { value.wrappedValue = $0 ? 1 : 0 }))
                 .labelsHidden()
+        case .bitset:
+            bitmaskControl(param: param, value: value)
         case .option where !param.options.isEmpty:
             Picker("", selection: value) {
                 ForEach(param.options) { option in
@@ -471,6 +512,57 @@ private struct CueEditorPanel: View {
                     .frame(width: 74)
             }
         }
+    }
+
+    private func bitmaskControl(param: CueParamDefinition, value: Binding<Double>) -> some View {
+        let bitCount = max(1, min(24, param.bitCount))
+        let selected = selectedBits(maskValue: value.wrappedValue, bitCount: bitCount)
+        let columns = [
+            GridItem(.adaptive(minimum: 24, maximum: 28), spacing: 4),
+        ]
+
+        return VStack(alignment: .leading, spacing: 6) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
+                ForEach(1 ... bitCount, id: \.self) { index in
+                    let isOn = selected.contains(index)
+                    Button("\(index)") {
+                        value.wrappedValue = toggledMaskValue(
+                            currentValue: value.wrappedValue,
+                            toggleIndex: index,
+                            bitCount: bitCount
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .frame(width: 24, height: 20)
+                    .background(isOn ? GlitchBoardTheme.accent.opacity(0.9) : GlitchBoardTheme.elevatedSurface)
+                    .foregroundStyle(isOn ? Color.black : Color.white.opacity(0.8))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                }
+            }
+
+            Text("Selected: \(selected.isEmpty ? "none" : selected.map(String.init).joined(separator: ", "))")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func selectedBits(maskValue: Double, bitCount: Int) -> [Int] {
+        let mask = max(0, Int(maskValue.rounded()))
+        return (1 ... bitCount).filter { index in
+            let bit = 1 << (index - 1)
+            return (mask & bit) != 0
+        }
+    }
+
+    private func toggledMaskValue(currentValue: Double, toggleIndex: Int, bitCount: Int) -> Double {
+        let clampedIndex = max(1, min(bitCount, toggleIndex))
+        var mask = max(0, Int(currentValue.rounded()))
+        let bit = 1 << (clampedIndex - 1)
+        mask ^= bit
+        let maxMask = (1 << bitCount) - 1
+        mask = max(0, min(maxMask, mask))
+        return Double(mask)
     }
 
     private func numberFormatter(for param: CueParamDefinition) -> NumberFormatter {
@@ -659,6 +751,10 @@ private struct CueLaneRowView: View {
                 .font(.caption)
                 .disabled(state.cueCount(for: lane.id) == 0)
             }
+
+            Text(state.laneCapabilitySummary(for: lane.id))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
 
             GeometryReader { proxy in
                 ZStack {

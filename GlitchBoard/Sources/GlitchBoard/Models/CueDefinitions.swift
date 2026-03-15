@@ -5,6 +5,7 @@ enum CueParamValueType: String, Hashable {
     case decimal
     case boolean
     case option
+    case bitset
 }
 
 struct CueParamOption: Identifiable, Hashable {
@@ -23,6 +24,7 @@ struct CueParamDefinition: Identifiable, Hashable {
     let valueType: CueParamValueType
     let stepValue: Double
     let options: [CueParamOption]
+    let bitCount: Int
 
     init(
         id: String,
@@ -33,7 +35,8 @@ struct CueParamDefinition: Identifiable, Hashable {
         defaultValue: Double,
         valueType: CueParamValueType = .integer,
         stepValue: Double = 1,
-        options: [CueParamOption] = []
+        options: [CueParamOption] = [],
+        bitCount: Int = 0
     ) {
         self.id = id
         self.key = key
@@ -44,6 +47,7 @@ struct CueParamDefinition: Identifiable, Hashable {
         self.valueType = valueType
         self.stepValue = stepValue
         self.options = options
+        self.bitCount = bitCount
     }
 }
 

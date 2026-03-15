@@ -24,6 +24,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
     @Published var activeProjectName = "No project loaded"
     @Published var showAutosaveRecoveryAlert = false
     @Published var libraryTemplates: [LibraryCueTemplate] = GlitchBoardState.defaultLibraryTemplates
+    @Published var capabilityPollingEnabled = false
+    @Published var lastCapabilitiesRefreshAt: Date?
 
     let nexusClient: NexusClient
 
@@ -39,13 +41,20 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private var requestedCapabilityTargets: Set<String> = []
     private var capabilitiesByClient: [String: [String: Any]] = [:]
     private var actionDefinitionsByClient: [String: [CueActionDefinition]] = [:]
+    private var capabilityInfoByClient: [String: DeviceCapabilityInfo] = [:]
 
     private let schedulerInterval: TimeInterval = 0.05
     private let schedulerLookAhead: TimeInterval = 0.20
     private let rangeAutomationStep: TimeInterval = 0.05
     private let capabilitiesPollInterval: TimeInterval = 3.0
     private let capabilityBootstrapQueryEnabled = true
-    private let capabilityPollingEnabled = false
+
+    private struct DeviceCapabilityInfo {
+        var model: String?
+        var actionCount: Int
+        var inputCount: Int?
+        var outputCount: Int?
+    }
 
     private static let placeholderLanes: [CueLane] = [
         CueLane(
@@ -140,6 +149,31 @@ final class GlitchBoardState: NSObject, ObservableObject {
         )
     }
 
+    private static func bitmaskValue(indices: [Int], bitCount: Int) -> Double {
+        guard bitCount > 0 else { return 0 }
+        var mask = 0
+        for index in indices where index >= 1 && index <= bitCount {
+            mask |= (1 << (index - 1))
+        }
+        return Double(mask)
+    }
+
+    private static func bitsetParam(_ key: String, _ name: String, bits: Int, defaultIndices: [Int] = [1]) -> CueParamDefinition {
+        let sanitizedBits = max(1, min(31, bits))
+        let maxValue = Double((1 << sanitizedBits) - 1)
+        return CueParamDefinition(
+            id: key,
+            key: key,
+            name: name,
+            minValue: 0,
+            maxValue: maxValue,
+            defaultValue: bitmaskValue(indices: defaultIndices, bitCount: sanitizedBits),
+            valueType: .bitset,
+            stepValue: 1,
+            bitCount: sanitizedBits
+        )
+    }
+
     private static let bootstrapCapabilityProfiles: [CapabilityProfile] = [
         CapabilityProfile(
             matchTokens: ["mtpx", "extron"],
@@ -149,6 +183,16 @@ final class GlitchBoardState: NSObject, ObservableObject {
                     name: "set_input_skew",
                     params: [
                         intParam("input", "input", min: 1, max: 16, default: 3),
+                        intParam("red", "red", min: 0, max: 31, default: 0),
+                        intParam("green", "green", min: 0, max: 31, default: 0),
+                        intParam("blue", "blue", min: 0, max: 31, default: 0),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "set_input_skew_multi",
+                    name: "set_input_skew_multi",
+                    params: [
+                        bitsetParam("input_mask", "input_mask", bits: 16, defaultIndices: [3]),
                         intParam("red", "red", min: 0, max: 31, default: 0),
                         intParam("green", "green", min: 0, max: 31, default: 0),
                         intParam("blue", "blue", min: 0, max: 31, default: 0),
@@ -188,6 +232,25 @@ final class GlitchBoardState: NSObject, ObservableObject {
                         ),
                     ]
                 ),
+                CueActionDefinition(
+                    id: "route_tie_multi",
+                    name: "route_tie_multi",
+                    params: [
+                        intParam("input", "input", min: 1, max: 16, default: 1),
+                        bitsetParam("output_mask", "output_mask", bits: 16, defaultIndices: [1]),
+                        optionParam(
+                            "mode",
+                            "mode",
+                            options: [
+                                CueParamOption(id: "all", label: "all", value: 0),
+                                CueParamOption(id: "rgb", label: "rgb", value: 1),
+                                CueParamOption(id: "video", label: "video", value: 2),
+                                CueParamOption(id: "audio", label: "audio", value: 3),
+                            ],
+                            default: 0
+                        ),
+                    ]
+                ),
             ]
         ),
         CapabilityProfile(
@@ -198,6 +261,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
                     name: "set_channel_mix",
                     params: [
                         intParam("channel", "channel", min: 1, max: 8, default: 1),
+                        intParam("mix", "mix", min: 0, max: 255, default: 127),
+                    ]
+                ),
+                CueActionDefinition(
+                    id: "set_channel_mix_multi",
+                    name: "set_channel_mix_multi",
+                    params: [
+                        bitsetParam("channel_mask", "channel_mask", bits: 8, defaultIndices: [1]),
                         intParam("mix", "mix", min: 0, max: 255, default: 127),
                     ]
                 ),
@@ -238,6 +309,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
                     ]
                 ),
                 CueActionDefinition(
+                    id: "atlas.route.multi",
+                    name: "atlas.route.multi",
+                    params: [
+                        intParam("input", "input", min: 1, max: 16, default: 1),
+                        bitsetParam("output_mask", "output_mask", bits: 16, defaultIndices: [1]),
+                    ]
+                ),
+                CueActionDefinition(
                     id: "pulse_relay",
                     name: "pulse_relay",
                     params: [
@@ -261,6 +340,12 @@ final class GlitchBoardState: NSObject, ObservableObject {
         LibraryCueTemplate(id: "lib.atlas_route", name: "Atlas Route A", actionID: "atlas.route", params: ["route": 1], icon: "🟢"),
         LibraryCueTemplate(id: "lib.hit", name: "Hard Hit", actionID: "flash.hit", params: ["value": 255], icon: "⚡"),
     ]
+
+    private static let shortClockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
     override init() {
         nexusClient = NexusClient(clientId: "glitchboard_v1", clientType: "daw")
@@ -294,6 +379,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             }
         }
 
+        loadCapabilitiesCache()
         wireNexusObservers()
         refreshLaneStatusesFromNexus()
         startAutosaveTimer()
@@ -337,6 +423,19 @@ final class GlitchBoardState: NSObject, ObservableObject {
     var autosaveURL: URL {
         let folder = URL(fileURLWithPath: NSString(string: "~/JBT/glitchboard").expandingTildeInPath, isDirectory: true)
         return folder.appendingPathComponent("autosave.jbt", isDirectory: false)
+    }
+
+    var capabilitiesCacheURL: URL {
+        autosaveURL.deletingLastPathComponent().appendingPathComponent("capabilities_cache.json", isDirectory: false)
+    }
+
+    var capabilityPollingStatus: String {
+        capabilityPollingEnabled ? "On" : "Off"
+    }
+
+    var lastCapabilitiesRefreshLabel: String {
+        guard let lastCapabilitiesRefreshAt else { return "--" }
+        return Self.shortClockFormatter.string(from: lastCapabilitiesRefreshAt)
     }
 
     func cues(for laneID: String) -> [TimelineCue] {
@@ -397,6 +496,49 @@ final class GlitchBoardState: NSObject, ObservableObject {
             return "Bootstrapped"
         }
         return "Fallback"
+    }
+
+    func laneCapabilitySummary(for laneID: String) -> String {
+        guard let lane = lanes.first(where: { $0.id == laneID }) else { return "No capability data" }
+        let actions = availableActions(for: laneID)
+        let source = actionSourceLabel(for: laneID)
+        if let info = capabilityInfo(for: lane) {
+            var parts: [String] = ["\(info.actionCount) actions"]
+            if let inputs = info.inputCount, let outputs = info.outputCount {
+                parts.append("\(inputs)x\(outputs) I/O")
+            } else if let inputs = info.inputCount {
+                parts.append("\(inputs) inputs")
+            } else if let outputs = info.outputCount {
+                parts.append("\(outputs) outputs")
+            }
+            if let model = info.model, !model.isEmpty {
+                parts.append(model)
+            }
+            return "\(source) • " + parts.joined(separator: " • ")
+        }
+
+        return "\(source) • \(actions.count) actions"
+    }
+
+    func toggleCapabilityPolling() {
+        capabilityPollingEnabled.toggle()
+        if capabilityPollingEnabled {
+            startCapabilitiesPollingTimer()
+            refreshCapabilitiesNow()
+        } else {
+            stopCapabilitiesPollingTimer()
+            statusText = "Capability polling disabled"
+        }
+    }
+
+    func refreshCapabilitiesNow() {
+        guard nexusClient.isConnected else {
+            statusText = "Nexus offline: using cached and bootstrapped capabilities"
+            return
+        }
+        requestCapabilitiesForOnlineClients(force: true)
+        lastCapabilitiesRefreshAt = Date()
+        statusText = "Requested capability refresh"
     }
 
     func actionDefinition(for laneID: String, actionID: String) -> CueActionDefinition? {
@@ -833,7 +975,34 @@ final class GlitchBoardState: NSObject, ObservableObject {
             return normalized
         case .option:
             return normalized.rounded()
+        case .bitset:
+            return normalized.rounded()
         }
+    }
+
+    private func serializeParamsForDispatch(cue: TimelineCue, rawValues: [String: Double]) -> [String: Any] {
+        guard let action = actionDefinition(for: cue.laneID, actionID: cue.actionID) else {
+            return rawValues
+        }
+        let definitions = Dictionary(uniqueKeysWithValues: action.params.map { ($0.key, $0) })
+        var payload: [String: Any] = [:]
+        for (key, rawValue) in rawValues {
+            guard let definition = definitions[key] else {
+                payload[key] = rawValue
+                continue
+            }
+
+            let normalized = normalizedParamValue(key: key, value: rawValue, laneID: cue.laneID, actionID: cue.actionID)
+            switch definition.valueType {
+            case .boolean:
+                payload[key] = normalized >= 0.5
+            case .integer, .option, .bitset:
+                payload[key] = Int(normalized.rounded())
+            case .decimal:
+                payload[key] = normalized
+            }
+        }
+        return payload
     }
 
     private func startPlayheadTimer() {
@@ -939,7 +1108,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
         guard !cue.muted else { return }
         guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { return }
 
-        var payload: [String: Any] = cue.params
+        var payload: [String: Any] = serializeParamsForDispatch(cue: cue, rawValues: cue.params)
         payload["cue_id"] = cue.id.uuidString
         payload["label"] = cue.label
         payload["bar_beat"] = barBeatString(for: cue.time)
@@ -966,13 +1135,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
             curveProgress = 1 - abs((progress * 2) - 1)
         }
 
-        var payload: [String: Any] = [:]
+        var interpolatedValues: [String: Double] = [:]
         let keys = Set(cue.startParams.keys).union(cue.endParams.keys).union(cue.params.keys)
         for key in keys {
             let startValue = cue.startParams[key] ?? cue.params[key] ?? 0
             let endValue = cue.endParams[key] ?? cue.params[key] ?? startValue
-            payload[key] = startValue + (endValue - startValue) * curveProgress
+            interpolatedValues[key] = startValue + (endValue - startValue) * curveProgress
         }
+        var payload: [String: Any] = serializeParamsForDispatch(cue: cue, rawValues: interpolatedValues)
         payload["cue_id"] = cue.id.uuidString
         payload["label"] = cue.label
         payload["interpolation"] = cue.interpolation.rawValue
@@ -1327,6 +1497,50 @@ final class GlitchBoardState: NSObject, ObservableObject {
         return Array(Set(pieces + [lowered]))
     }
 
+    private func loadCapabilitiesCache() {
+        guard capabilitiesCacheURL.fileExists else { return }
+        guard let data = try? Data(contentsOf: capabilitiesCacheURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let clients = root["clients"] as? [String: Any]
+        else {
+            return
+        }
+
+        var loadedCapabilities: [String: [String: Any]] = [:]
+        var loadedActions: [String: [CueActionDefinition]] = [:]
+        var loadedInfo: [String: DeviceCapabilityInfo] = [:]
+
+        for (clientID, rawCaps) in clients {
+            guard let capabilities = rawCaps as? [String: Any] else { continue }
+            loadedCapabilities[clientID] = capabilities
+            let actions = parseActions(from: capabilities)
+            loadedActions[clientID] = actions
+            loadedInfo[clientID] = summarizeCapabilities(capabilities: capabilities, actions: actions)
+        }
+
+        capabilitiesByClient.merge(loadedCapabilities) { _, new in new }
+        actionDefinitionsByClient.merge(loadedActions) { _, new in new }
+        capabilityInfoByClient.merge(loadedInfo) { _, new in new }
+    }
+
+    private func saveCapabilitiesCache() {
+        do {
+            let clients = capabilitiesByClient.reduce(into: [String: Any]()) { partial, pair in
+                partial[pair.key] = pair.value
+            }
+            let root: [String: Any] = [
+                "saved_at": ISO8601DateFormatter().string(from: Date()),
+                "clients": clients,
+            ]
+            guard JSONSerialization.isValidJSONObject(root) else { return }
+            try FileManager.default.createDirectory(at: capabilitiesCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: capabilitiesCacheURL, options: .atomic)
+        } catch {
+            // Cache write is best-effort and should not interrupt UI flow.
+        }
+    }
+
     private func startAutosaveTimer() {
         autosaveTimer?.invalidate()
         autosaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -1345,11 +1559,17 @@ final class GlitchBoardState: NSObject, ObservableObject {
         capabilitiesPollTimer = Timer.scheduledTimer(withTimeInterval: capabilitiesPollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.requestCapabilitiesForOnlineClients(force: true)
+                self?.lastCapabilitiesRefreshAt = Date()
             }
         }
         if let capabilitiesPollTimer {
             RunLoop.main.add(capabilitiesPollTimer, forMode: .common)
         }
+    }
+
+    private func stopCapabilitiesPollingTimer() {
+        capabilitiesPollTimer?.invalidate()
+        capabilitiesPollTimer = nil
     }
 
     private func wireNexusObservers() {
@@ -1362,6 +1582,11 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 }
                 if self.capabilityBootstrapQueryEnabled {
                     self.requestCapabilitiesForOnlineClients(force: false)
+                }
+                if self.capabilityPollingEnabled {
+                    self.startCapabilitiesPollingTimer()
+                } else {
+                    self.stopCapabilitiesPollingTimer()
                 }
                 self.refreshLaneStatusesFromNexus()
             }
@@ -1378,7 +1603,11 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
         let capabilities = message.payload["capabilities"]?.anyValue as? [String: Any] ?? [:]
         capabilitiesByClient[target] = capabilities
-        actionDefinitionsByClient[target] = parseActions(from: capabilities)
+        let actions = parseActions(from: capabilities)
+        actionDefinitionsByClient[target] = actions
+        capabilityInfoByClient[target] = summarizeCapabilities(capabilities: capabilities, actions: actions)
+        saveCapabilitiesCache()
+        lastCapabilitiesRefreshAt = Date()
 
         if let index = lanes.firstIndex(where: { $0.target == target }),
            let label = (capabilities["device_label"] as? String)
@@ -1497,6 +1726,22 @@ final class GlitchBoardState: NSObject, ObservableObject {
         return "#888888"
     }
 
+    private func capabilityInfo(for lane: CueLane) -> DeviceCapabilityInfo? {
+        if let direct = capabilityInfoByClient[lane.target] {
+            return direct
+        }
+        if let matched = capabilityInfoByClient.first(where: { key, _ in
+            lane.discoveryHints.contains(where: { key.lowercased().contains($0.lowercased()) })
+        })?.value {
+            return matched
+        }
+
+        if let bootstrap = bootstrapActions(for: lane), !bootstrap.isEmpty {
+            return summarizeCapabilities(capabilities: [:], actions: bootstrap)
+        }
+        return nil
+    }
+
     private func prettyLabel(for clientID: String) -> String {
         clientID
             .replacingOccurrences(of: "_", with: " ")
@@ -1506,6 +1751,62 @@ final class GlitchBoardState: NSObject, ObservableObject {
                 chunk.prefix(1).uppercased() + chunk.dropFirst()
             }
             .joined(separator: " ")
+    }
+
+    private func summarizeCapabilities(capabilities: [String: Any], actions: [CueActionDefinition]) -> DeviceCapabilityInfo {
+        let root: [String: Any] = {
+            if let nested = capabilities["capabilities"] as? [String: Any] {
+                return nested
+            }
+            if let payload = capabilities["payload"] as? [String: Any],
+               let nested = payload["capabilities"] as? [String: Any]
+            {
+                return nested
+            }
+            return capabilities
+        }()
+
+        let model = (root["model"] as? String)
+            ?? (root["device_model"] as? String)
+            ?? ((root["device"] as? [String: Any])?["model"] as? String)
+            ?? ((root["device"] as? [String: Any])?["name"] as? String)
+
+        var inputCount = intValue(root["input_count"])
+            ?? intValue((root["io"] as? [String: Any])?["inputs"])
+            ?? intValue((root["matrix"] as? [String: Any])?["inputs"])
+            ?? intValue((root["ports"] as? [String: Any])?["inputs"])
+        var outputCount = intValue(root["output_count"])
+            ?? intValue((root["io"] as? [String: Any])?["outputs"])
+            ?? intValue((root["matrix"] as? [String: Any])?["outputs"])
+            ?? intValue((root["ports"] as? [String: Any])?["outputs"])
+
+        if inputCount == nil {
+            inputCount = actions
+                .flatMap(\.params)
+                .filter { $0.key.lowercased().contains("input") && ($0.valueType == .integer || $0.valueType == .bitset) }
+                .map {
+                    if $0.valueType == .bitset { return $0.bitCount }
+                    return Int($0.maxValue.rounded())
+                }
+                .max()
+        }
+        if outputCount == nil {
+            outputCount = actions
+                .flatMap(\.params)
+                .filter { $0.key.lowercased().contains("output") && ($0.valueType == .integer || $0.valueType == .bitset) }
+                .map {
+                    if $0.valueType == .bitset { return $0.bitCount }
+                    return Int($0.maxValue.rounded())
+                }
+                .max()
+        }
+
+        return DeviceCapabilityInfo(
+            model: model,
+            actionCount: actions.count,
+            inputCount: inputCount,
+            outputCount: outputCount
+        )
     }
 
     private func parseActions(from capabilities: [String: Any]) -> [CueActionDefinition] {
@@ -1594,6 +1895,10 @@ final class GlitchBoardState: NSObject, ObservableObject {
             ?? (row["name"] as? String)
             ?? key
         let typeHint = (row["type"] as? String)?.lowercased() ?? ""
+        let isBitsetType = typeHint == "bitset"
+            || typeHint == "bitmask"
+            || typeHint == "mask"
+            || key.lowercased().hasSuffix("_mask")
         let options = parseParamOptions(row["options"])
         let range = parseRange(row["range"])
         let isBoolType = typeHint == "bool" || typeHint == "boolean"
@@ -1612,6 +1917,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
         let inferredType: CueParamValueType = {
             if isBoolType { return .boolean }
+            if isBitsetType { return .bitset }
             if !options.isEmpty { return .option }
             if typeHint == "float" || typeHint == "double" || typeHint == "decimal" {
                 return .decimal
@@ -1631,13 +1937,25 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
         let stepValue: Double = {
             switch inferredType {
-            case .boolean, .integer, .option: return 1
+            case .boolean, .integer, .option, .bitset: return 1
             case .decimal:
                 let span = maxValue - minValue
                 if span <= 1 { return 0.01 }
                 if span <= 10 { return 0.05 }
                 return 0.1
             }
+        }()
+
+        let explicitBitCount = intValue(row["bits"]) ?? intValue(row["bit_count"])
+        let inferredBitCount: Int = {
+            guard inferredType == .bitset else { return 0 }
+            if let explicitBitCount {
+                return max(1, min(31, explicitBitCount))
+            }
+            if maxValue > 0 {
+                return max(1, min(31, Int(log2(maxValue + 1).rounded(.up))))
+            }
+            return 16
         }()
 
         return CueParamDefinition(
@@ -1649,7 +1967,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
             defaultValue: defaultValue,
             valueType: inferredType,
             stepValue: stepValue,
-            options: options.sorted { $0.value < $1.value }
+            options: options.sorted { $0.value < $1.value },
+            bitCount: inferredBitCount
         )
     }
 
@@ -1721,6 +2040,16 @@ final class GlitchBoardState: NSObject, ObservableObject {
             return (range[0].doubleValue, range[1].doubleValue)
         }
         return nil
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let v as Int: return v
+        case let v as Double: return Int(v.rounded())
+        case let v as NSNumber: return v.intValue
+        case let v as String: return Int(v)
+        default: return nil
+        }
     }
 
     private func doubleValue(_ value: Any?) -> Double? {
