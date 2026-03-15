@@ -161,6 +161,7 @@ _TYPED_ADAPTER = TypeAdapter(TypedMessage)
 
 
 def parse_message(raw: dict[str, Any]) -> NexusMessage | TypedMessage:
+    raw = _normalize_legacy_message(raw)
     try:
         return _TYPED_ADAPTER.validate_python(raw)
     except Exception:
@@ -179,3 +180,73 @@ def make_message(
         "source": source,
         "payload": payload or {},
     }
+
+
+def _normalize_legacy_message(raw: dict[str, Any]) -> dict[str, Any]:
+    # Already in current envelope format.
+    if {"id", "type", "source", "payload"}.issubset(raw.keys()):
+        return raw
+
+    message_type = str(raw.get("type", "") or "")
+    source = str(raw.get("source") or raw.get("client_id") or "legacy_client")
+    message_id = str(raw.get("id") or raw.get("request_id") or f"legacy_{uuid4().hex[:12]}")
+
+    # Legacy registration from Atlas bridge: no "type", top-level fields.
+    if (
+        not message_type
+        and "client_id" in raw
+        and "client_type" in raw
+        and ("version" in raw or "capabilities" in raw)
+    ) or message_type == "registration":
+        capabilities_raw = raw.get("capabilities", {})
+        if isinstance(capabilities_raw, dict):
+            capabilities = capabilities_raw
+        elif isinstance(capabilities_raw, list):
+            capabilities = {str(item): True for item in capabilities_raw}
+        else:
+            capabilities = {}
+        return make_message(
+            "register",
+            source=source,
+            payload={
+                "client_id": source,
+                "client_type": str(raw.get("client_type") or "app"),
+                "capabilities": capabilities,
+            },
+            message_id=message_id,
+        )
+
+    # Legacy heartbeat: {"type":"heartbeat","client_id":"atlas","timestamp":"..."}
+    if message_type == "heartbeat" and "payload" not in raw:
+        uptime = raw.get("uptime_seconds")
+        payload: dict[str, Any] = {}
+        if isinstance(uptime, (int, float)):
+            payload["uptime_seconds"] = float(uptime)
+        return make_message("heartbeat", source=source, payload=payload, message_id=message_id)
+
+    # Legacy state update: {"type":"state_update","client_id":"atlas","state":{...}}
+    if message_type == "state_update" and "payload" not in raw and "state" in raw:
+        state = raw.get("state")
+        if not isinstance(state, dict):
+            state = {}
+        return make_message("state_update", source=source, payload={"state": state}, message_id=message_id)
+
+    # Legacy intent: {"type":"intent","request_id":"...","targets":[...],"action":"...","params":{...}}
+    if message_type == "intent" and "payload" not in raw and "targets" in raw and "action" in raw:
+        targets_raw = raw.get("targets")
+        params_raw = raw.get("params")
+        targets = [str(item) for item in targets_raw] if isinstance(targets_raw, list) else []
+        params = params_raw if isinstance(params_raw, dict) else {}
+        return make_message(
+            "intent",
+            source=source,
+            payload={"targets": targets, "action": str(raw.get("action")), "params": params},
+            message_id=message_id,
+        )
+
+    # If type exists but payload/source are missing, wrap what we can.
+    if message_type and "payload" not in raw:
+        passthrough_payload = {k: v for k, v in raw.items() if k not in {"id", "type", "source", "client_id"}}
+        return make_message(message_type, source=source, payload=passthrough_payload, message_id=message_id)
+
+    return raw
