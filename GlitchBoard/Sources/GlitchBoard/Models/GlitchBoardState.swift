@@ -42,10 +42,12 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private var capabilitiesByClient: [String: [String: Any]] = [:]
     private var actionDefinitionsByClient: [String: [CueActionDefinition]] = [:]
     private var capabilityInfoByClient: [String: DeviceCapabilityInfo] = [:]
+    private var lastDispatchStatusUpdateAt: Date?
 
     private let schedulerInterval: TimeInterval = 0.05
     private let schedulerLookAhead: TimeInterval = 0.20
     private let rangeAutomationStep: TimeInterval = 0.05
+    private let dispatchStatusMinInterval: TimeInterval = 0.25
     private let capabilitiesPollInterval: TimeInterval = 3.0
     private let capabilityBootstrapQueryEnabled = true
 
@@ -439,7 +441,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
     }
 
     func cues(for laneID: String) -> [TimelineCue] {
-        cues.filter { $0.laneID == laneID }.sorted { $0.time < $1.time }
+        // The global cue list is maintained sorted by time; keep this filter cheap for realtime redraw.
+        cues.filter { $0.laneID == laneID }
     }
 
     func cueCount(for laneID: String) -> Int {
@@ -1007,7 +1010,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     private func startPlayheadTimer() {
         stopPlayheadTimer()
-        playheadTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        playheadTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard self != nil else { return }
             Task { @MainActor [weak self] in
                 self?.updatePlayhead()
@@ -1115,7 +1118,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
         payload["type"] = cue.kind.rawValue
 
         nexusClient.sendIntent(targets: [lane.target], action: cue.actionID, params: payload)
-        statusText = "Fired \(cue.label) on \(lane.name)"
+        updateDispatchStatus("Fired \(cue.label) on \(lane.name)")
     }
 
     private func dispatchRangeStep(cueID: UUID, laneTarget: String, laneName: String, atTime playbackTime: Double) {
@@ -1151,7 +1154,18 @@ final class GlitchBoardState: NSObject, ObservableObject {
         payload["bar_beat"] = barBeatString(for: playbackTime)
 
         nexusClient.sendIntent(targets: [laneTarget], action: cue.actionID, params: payload)
-        statusText = "Automating \(cue.label) on \(laneName)"
+        updateDispatchStatus("Automating \(cue.label) on \(laneName)")
+    }
+
+    private func updateDispatchStatus(_ message: String) {
+        let now = Date()
+        if let lastDispatchStatusUpdateAt,
+           now.timeIntervalSince(lastDispatchStatusUpdateAt) < dispatchStatusMinInterval
+        {
+            return
+        }
+        lastDispatchStatusUpdateAt = now
+        statusText = message
     }
 
     private func updatePlayhead() {

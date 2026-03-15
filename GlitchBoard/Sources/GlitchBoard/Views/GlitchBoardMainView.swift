@@ -581,7 +581,6 @@ private struct CueEditorPanel: View {
 private struct TrackGridOverlayView: View {
     let duration: Double
     let beatDuration: Double
-    let playheadTime: Double
 
     var body: some View {
         Canvas { context, size in
@@ -601,12 +600,26 @@ private struct TrackGridOverlayView: View {
                     lineWidth: isBar ? 1.1 : 0.6
                 )
             }
+        }
+        .allowsHitTesting(false)
+    }
+}
 
-            let playheadX = CGFloat(playheadTime / duration) * size.width
-            var playheadPath = Path()
-            playheadPath.move(to: CGPoint(x: playheadX, y: 0))
-            playheadPath.addLine(to: CGPoint(x: playheadX, y: size.height))
-            context.stroke(playheadPath, with: .color(GlitchBoardTheme.accent), lineWidth: 2)
+private struct PlayheadOverlayView: View {
+    let duration: Double
+    let playheadTime: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            if duration > 0 {
+                Rectangle()
+                    .fill(GlitchBoardTheme.accent)
+                    .frame(width: 2, height: proxy.size.height)
+                    .position(
+                        x: min(max(0, CGFloat(playheadTime / duration) * proxy.size.width), proxy.size.width),
+                        y: proxy.size.height / 2
+                    )
+            }
         }
         .allowsHitTesting(false)
     }
@@ -664,16 +677,13 @@ private struct BarBeatRulerView: View {
                     anchor: .topLeading
                 )
             }
-
-            let playheadX = CGFloat(state.playheadTime / state.audioDuration) * size.width
-            var playheadPath = Path()
-            playheadPath.move(to: CGPoint(x: playheadX, y: 0))
-            playheadPath.addLine(to: CGPoint(x: playheadX, y: size.height))
-            context.stroke(playheadPath, with: .color(GlitchBoardTheme.accent), lineWidth: 2)
         }
         .frame(width: contentWidth, height: 54)
         .background(GlitchBoardTheme.elevatedSurface)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            PlayheadOverlayView(duration: state.audioDuration, playheadTime: state.playheadTime)
+        )
     }
 }
 
@@ -686,8 +696,7 @@ private struct WaveformView: View {
             GlitchBoardTheme.elevatedSurface
             TrackGridOverlayView(
                 duration: state.audioDuration,
-                beatDuration: state.beatDuration,
-                playheadTime: state.playheadTime
+                beatDuration: state.beatDuration
             )
 
             Canvas { context, size in
@@ -724,6 +733,9 @@ private struct WaveformView: View {
         }
         .frame(width: contentWidth, height: 240)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            PlayheadOverlayView(duration: state.audioDuration, playheadTime: state.playheadTime)
+        )
     }
 }
 
@@ -762,8 +774,7 @@ private struct CueLaneRowView: View {
 
                     TrackGridOverlayView(
                         duration: state.audioDuration,
-                        beatDuration: state.beatDuration,
-                        playheadTime: state.playheadTime
+                        beatDuration: state.beatDuration
                     )
 
                     ForEach(state.cues(for: lane.id)) { cue in
@@ -800,6 +811,9 @@ private struct CueLaneRowView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(laneAccentColor.opacity(0.28), lineWidth: 1)
+            )
+            .overlay(
+                PlayheadOverlayView(duration: state.audioDuration, playheadTime: state.playheadTime)
             )
         }
     }
