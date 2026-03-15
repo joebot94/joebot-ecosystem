@@ -403,8 +403,16 @@ final class GlitchBoardState: NSObject, ObservableObject {
         cues.count
     }
 
+    var currentAudioTimeSeconds: Double {
+        audioPlayer?.currentTime ?? playheadTime
+    }
+
+    var totalAudioDurationSeconds: Double {
+        audioPlayer?.duration ?? audioDuration
+    }
+
     var currentSongPositionString: String {
-        formatClock(playheadTime)
+        formatClock(currentAudioTimeSeconds)
     }
 
     var selectedCue: TimelineCue? {
@@ -902,7 +910,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     }
 
     func songProgressDetail() -> String {
-        "\(formatClock(playheadTime)) / \(formatClock(audioDuration))"
+        "\(formatClock(currentAudioTimeSeconds)) / \(formatClock(totalAudioDurationSeconds))"
     }
 
     private func laneName(for laneID: String) -> String {
@@ -1170,10 +1178,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     private func updatePlayhead() {
         guard let audioPlayer else { return }
-        let current = min(audioDuration, audioPlayer.currentTime)
+        let totalDuration = max(audioDuration, audioPlayer.duration)
+        if audioDuration != totalDuration {
+            audioDuration = totalDuration
+        }
+        let current = min(totalDuration, audioPlayer.currentTime)
         playheadTime = current
 
-        if !audioPlayer.isPlaying, current >= audioDuration - 0.001 {
+        if !audioPlayer.isPlaying, current >= totalDuration - 0.001 {
             isPlaying = false
             stopPlayheadTimer()
             stopSchedulerTimer()

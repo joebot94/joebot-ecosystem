@@ -667,14 +667,17 @@ private struct BarBeatRulerView: View {
             }
 
             for bar in 0 ..< totalBars {
-                let beatIndex = Double(bar * 4)
-                let x = CGFloat((beatIndex * state.beatDuration) / state.audioDuration) * size.width
+                let barStartBeat = Double(bar * 4)
+                let barEndBeat = min(Double((bar + 1) * 4), Double(beatCount))
+                let xStart = CGFloat((barStartBeat * state.beatDuration) / state.audioDuration) * size.width
+                let xEnd = CGFloat((barEndBeat * state.beatDuration) / state.audioDuration) * size.width
+                let xCenter = (xStart + xEnd) * 0.5
                 context.draw(
                     Text("\(bar + 1)")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundColor(.secondary),
-                    at: CGPoint(x: x + 6, y: 9),
-                    anchor: .topLeading
+                    at: CGPoint(x: xCenter, y: 9),
+                    anchor: .top
                 )
             }
         }
