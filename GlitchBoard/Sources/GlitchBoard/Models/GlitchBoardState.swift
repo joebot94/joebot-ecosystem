@@ -32,6 +32,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private var playheadTimer: Timer?
     private var schedulerTimer: Timer?
     private var autosaveTimer: Timer?
+    private var capabilitiesPollTimer: Timer?
     private var scheduledCueIDs: Set<UUID> = []
     private var scheduledRangeBuckets: Set<String> = []
     private var subscriptions: Set<AnyCancellable> = []
@@ -42,6 +43,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private let schedulerInterval: TimeInterval = 0.05
     private let schedulerLookAhead: TimeInterval = 0.20
     private let rangeAutomationStep: TimeInterval = 0.05
+    private let capabilitiesPollInterval: TimeInterval = 3.0
 
     private static let placeholderLanes: [CueLane] = [
         CueLane(
@@ -122,6 +124,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
         wireNexusObservers()
         refreshLaneStatusesFromNexus()
         startAutosaveTimer()
+        startCapabilitiesPollingTimer()
         showAutosaveRecoveryAlert = autosaveURL.fileExists
     }
 
@@ -1069,12 +1072,27 @@ final class GlitchBoardState: NSObject, ObservableObject {
         }
     }
 
+    private func startCapabilitiesPollingTimer() {
+        capabilitiesPollTimer?.invalidate()
+        capabilitiesPollTimer = Timer.scheduledTimer(withTimeInterval: capabilitiesPollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.requestCapabilitiesForOnlineClients(force: true)
+            }
+        }
+        if let capabilitiesPollTimer {
+            RunLoop.main.add(capabilitiesPollTimer, forMode: .common)
+        }
+    }
+
     private func wireNexusObservers() {
         nexusClient.$isConnected
             .combineLatest(nexusClient.$isConnecting, nexusClient.$connectedClients)
             .sink { [weak self] _, _, _ in
                 guard let self else { return }
-                self.requestCapabilitiesIfNeeded()
+                if !self.nexusClient.isConnected {
+                    self.requestedCapabilityTargets.removeAll()
+                }
+                self.requestCapabilitiesForOnlineClients(force: false)
                 self.refreshLaneStatusesFromNexus()
             }
             .store(in: &subscriptions)
@@ -1100,11 +1118,11 @@ final class GlitchBoardState: NSObject, ObservableObject {
         }
     }
 
-    private func requestCapabilitiesIfNeeded() {
+    private func requestCapabilitiesForOnlineClients(force: Bool) {
         guard nexusClient.isConnected, !nexusClient.isConnecting else { return }
         for client in nexusClient.connectedClients where client.online {
             guard client.clientId != nexusClient.clientId, client.clientType != "monitor" else { continue }
-            if requestedCapabilityTargets.contains(client.clientId) {
+            if !force, requestedCapabilityTargets.contains(client.clientId) {
                 continue
             }
             requestedCapabilityTargets.insert(client.clientId)
