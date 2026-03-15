@@ -22,16 +22,20 @@ final class GlitchBoardState: NSObject, ObservableObject {
     @Published var lanes: [CueLane] = GlitchBoardState.placeholderLanes
     @Published var projectName = "Untitled Show"
     @Published var activeProjectName = "No project loaded"
+    @Published var showAutosaveRecoveryAlert = false
+    @Published var libraryTemplates: [LibraryCueTemplate] = GlitchBoardState.defaultLibraryTemplates
 
     let nexusClient: NexusClient
 
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioURL: URL?
     private var playheadTimer: Timer?
+    private var autosaveTimer: Timer?
     private var firedCueIDs: Set<UUID> = []
     private var subscriptions: Set<AnyCancellable> = []
     private var requestedCapabilityTargets: Set<String> = []
     private var capabilitiesByClient: [String: [String: Any]] = [:]
+    private var actionDefinitionsByClient: [String: [CueActionDefinition]] = [:]
 
     private static let placeholderLanes: [CueLane] = [
         CueLane(
@@ -40,7 +44,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             target: "device.dirty_mixer.1",
             status: .offline,
             accentHex: "#FF6600",
-            discoveryHints: ["dirtymixer", "dirty_mixer"]
+            discoveryHints: ["dirtymixer", "dirty_mixer", "mixer"]
         ),
         CueLane(
             id: "lane.mtpx_1",
@@ -57,7 +61,24 @@ final class GlitchBoardState: NSObject, ObservableObject {
             status: .offline,
             accentHex: "#00FF88",
             discoveryHints: ["atlas", "extron"]
+        ),
+    ]
+
+    private static let fallbackActions: [CueActionDefinition] = [
+        CueActionDefinition(
+            id: "glitchboard.cue.trigger",
+            name: "glitchboard.cue.trigger",
+            params: [
+                CueParamDefinition(id: "intensity", key: "intensity", name: "intensity", minValue: 0, maxValue: 255, defaultValue: 127),
+            ]
         )
+    ]
+
+    private static let defaultLibraryTemplates: [LibraryCueTemplate] = [
+        LibraryCueTemplate(id: "lib.max_blue", name: "Max Blue Separation", actionID: "set_input_skew", params: ["red": 0, "green": 0, "blue": 31], icon: "🔵"),
+        LibraryCueTemplate(id: "lib.dirty_ramp", name: "Dirty Ramp", actionID: "mix.ramp", params: ["start": 0, "end": 255], icon: "🎚"),
+        LibraryCueTemplate(id: "lib.atlas_route", name: "Atlas Route A", actionID: "atlas.route", params: ["route": 1], icon: "🟢"),
+        LibraryCueTemplate(id: "lib.hit", name: "Hard Hit", actionID: "flash.hit", params: ["value": 255], icon: "⚡"),
     ]
 
     override init() {
@@ -94,6 +115,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
         wireNexusObservers()
         refreshLaneStatusesFromNexus()
+        startAutosaveTimer()
+        showAutosaveRecoveryAlert = autosaveURL.fileExists
     }
 
     var beatDuration: Double {
@@ -118,13 +141,18 @@ final class GlitchBoardState: NSObject, ObservableObject {
     }
 
     var selectedCueSummary: String {
-        guard let selectedCue else { return "None" }
-        let laneName = lanes.first(where: { $0.id == selectedCue.laneID })?.name ?? "Unknown Lane"
-        return "\(selectedCue.label) • \(laneName) • \(barBeatString(for: selectedCue.time))"
+        guard let cue = selectedCue else { return "None" }
+        let laneName = lanes.first(where: { $0.id == cue.laneID })?.name ?? "Unknown Lane"
+        return "\(cue.label) • \(laneName) • \(barBeatString(for: cue.time))"
     }
 
     var timelineContentWidth: CGFloat {
         max(timelineViewportWidth, timelineViewportWidth * zoomScale)
+    }
+
+    var autosaveURL: URL {
+        let folder = URL(fileURLWithPath: NSString(string: "~/JBT/glitchboard").expandingTildeInPath, isDirectory: true)
+        return folder.appendingPathComponent("autosave.jbt", isDirectory: false)
     }
 
     func cues(for laneID: String) -> [TimelineCue] {
@@ -151,30 +179,95 @@ final class GlitchBoardState: NSObject, ObservableObject {
         zoomScale = 1
     }
 
+    func availableActions(for laneID: String) -> [CueActionDefinition] {
+        guard let lane = lanes.first(where: { $0.id == laneID }) else {
+            return Self.fallbackActions
+        }
+        if let direct = actionDefinitionsByClient[lane.target], !direct.isEmpty {
+            return direct
+        }
+        if let matched = actionDefinitionsByClient.first(where: { key, _ in
+            lane.discoveryHints.contains(where: { key.lowercased().contains($0.lowercased()) })
+        })?.value, !matched.isEmpty {
+            return matched
+        }
+        return Self.fallbackActions
+    }
+
+    func actionDefinition(for laneID: String, actionID: String) -> CueActionDefinition? {
+        availableActions(for: laneID).first(where: { $0.id == actionID })
+    }
+
+    func updateSelectedCueLane(_ laneID: String) {
+        guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
+        cues[index].laneID = laneID
+        cues[index].deviceTarget = lanes.first(where: { $0.id == laneID })?.target ?? cues[index].deviceTarget
+
+        let actions = availableActions(for: laneID)
+        if actions.contains(where: { $0.id == cues[index].actionID }) == false,
+           let fallback = actions.first
+        {
+            cues[index].actionID = fallback.id
+            applyDefaultParams(forCueAt: index, using: fallback)
+        }
+    }
+
+    func updateSelectedCueAction(_ actionID: String) {
+        guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
+        cues[index].actionID = actionID
+        if let action = actionDefinition(for: cues[index].laneID, actionID: actionID) {
+            applyDefaultParams(forCueAt: index, using: action)
+        }
+    }
+
+    func updateSelectedCueParam(key: String, value: Double) {
+        guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
+        cues[index].params[key] = value
+    }
+
+    func updateSelectedRangeParam(key: String, startValue: Double, endValue: Double) {
+        guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
+        cues[index].startParams[key] = startValue
+        cues[index].endParams[key] = endValue
+    }
+
+    func updateSelectedCueInterpolation(_ interpolation: CueInterpolation) {
+        guard let selectedCueID, let index = cues.firstIndex(where: { $0.id == selectedCueID }) else { return }
+        cues[index].interpolation = interpolation
+    }
+
     func promptSaveProject() {
         let panel = NSSavePanel()
-        panel.title = "Save GlitchBoard Project"
+        panel.title = "Save GlitchBoard Setlist"
         panel.canCreateDirectories = true
         panel.allowedContentTypes = [UTType(filenameExtension: "jbt") ?? .json, .json]
         panel.nameFieldStringValue = "\(safeProjectFileName()).jbt"
 
         guard panel.runModal() == .OK, let chosenURL = panel.url else { return }
-        let destination = chosenURL.pathExtension.isEmpty
-            ? chosenURL.appendingPathExtension("jbt")
-            : chosenURL
-        saveProject(to: destination)
+        let destination = chosenURL.pathExtension.isEmpty ? chosenURL.appendingPathExtension("jbt") : chosenURL
+        saveSetlist(to: destination, isAutosave: false)
     }
 
     func promptLoadProject() {
         let panel = NSOpenPanel()
-        panel.title = "Open GlitchBoard Project"
+        panel.title = "Open GlitchBoard Setlist"
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [UTType(filenameExtension: "jbt") ?? .json, .json]
 
         guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
-        loadProject(from: sourceURL)
+        loadSetlist(from: sourceURL)
+    }
+
+    func recoverAutosave() {
+        loadSetlist(from: autosaveURL)
+        showAutosaveRecoveryAlert = false
+    }
+
+    func discardAutosave() {
+        try? FileManager.default.removeItem(at: autosaveURL)
+        showAutosaveRecoveryAlert = false
     }
 
     func loadAudio(from url: URL) {
@@ -272,12 +365,63 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     func deleteSelectedCue() {
         guard let selectedCueID else { return }
-        let hadCue = cues.contains { $0.id == selectedCueID }
-        cues.removeAll { $0.id == selectedCueID }
+        deleteCue(selectedCueID)
+    }
+
+    func deleteCue(_ cueID: UUID) {
+        let hadCue = cues.contains { $0.id == cueID }
+        cues.removeAll { $0.id == cueID }
         if hadCue {
-            firedCueIDs.remove(selectedCueID)
-            selectCue(nil)
-            statusText = "Deleted selected cue"
+            firedCueIDs.remove(cueID)
+            if selectedCueID == cueID {
+                selectCue(nil)
+            }
+            statusText = "Deleted cue"
+        }
+    }
+
+    func duplicateCue(_ cueID: UUID) {
+        guard let cue = cues.first(where: { $0.id == cueID }) else { return }
+        var copy = cue
+        copy.id = UUID()
+        copy.time = min(audioDuration, cue.time + beatDuration)
+        if let endTime = cue.endTime {
+            copy.endTime = min(audioDuration, endTime + beatDuration)
+        }
+        cues.append(copy)
+        cues.sort { $0.time < $1.time }
+        selectCue(copy.id)
+        statusText = "Duplicated cue"
+    }
+
+    func toggleMute(_ cueID: UUID) {
+        guard let index = cues.firstIndex(where: { $0.id == cueID }) else { return }
+        cues[index].muted.toggle()
+        statusText = cues[index].muted ? "Cue muted" : "Cue unmuted"
+    }
+
+    func cycleInterpolation(for cueID: UUID) {
+        guard let index = cues.firstIndex(where: { $0.id == cueID }) else { return }
+        guard cues[index].kind == .range else { return }
+        let next = CueInterpolation.allCases
+        if let currentIndex = next.firstIndex(of: cues[index].interpolation) {
+            cues[index].interpolation = next[(currentIndex + 1) % next.count]
+        }
+    }
+
+    func updateCueBoundary(cueID: UUID, isStart: Bool, xPosition: CGFloat, laneWidth: CGFloat) {
+        guard let index = cues.firstIndex(where: { $0.id == cueID }) else { return }
+        guard cues[index].kind == .range else { return }
+        guard laneWidth > 0 else { return }
+
+        let normalized = max(0, min(1, xPosition / laneWidth))
+        let snapped = snapToQuarterNote(Double(normalized) * audioDuration)
+        let end = cues[index].endTime ?? cues[index].time
+
+        if isStart {
+            cues[index].time = min(snapped, end)
+        } else {
+            cues[index].endTime = max(snapped, cues[index].time)
         }
     }
 
@@ -300,7 +444,54 @@ final class GlitchBoardState: NSObject, ObservableObject {
             return
         }
 
-        placeCue(in: laneID, at: normalized)
+        placeOneShotCue(in: laneID, at: normalized, fromTemplate: nil)
+    }
+
+    func createRangeCue(in laneID: String, startX: CGFloat, endX: CGFloat, laneWidth: CGFloat) {
+        guard hasAudio, laneWidth > 0 else { return }
+        let left = max(0, min(1, min(startX, endX) / laneWidth))
+        let right = max(0, min(1, max(startX, endX) / laneWidth))
+        let startTime = snapToQuarterNote(Double(left) * audioDuration)
+        let endTime = snapToQuarterNote(Double(right) * audioDuration)
+        guard endTime - startTime >= beatDuration * 0.5 else { return }
+
+        let action = availableActions(for: laneID).first ?? Self.fallbackActions[0]
+        let defaults = Dictionary(uniqueKeysWithValues: action.params.map { ($0.key, $0.defaultValue) })
+        let laneTarget = lanes.first(where: { $0.id == laneID })?.target ?? ""
+        let cue = TimelineCue(
+            laneID: laneID,
+            time: startTime,
+            endTime: endTime,
+            label: "Cue",
+            muted: false,
+            deviceTarget: laneTarget,
+            actionID: action.id,
+            params: defaults,
+            startParams: defaults,
+            endParams: defaults,
+            kind: .range,
+            interpolation: .linear
+        )
+        cues.append(cue)
+        cues.sort { $0.time < $1.time }
+        selectCue(cue.id)
+        statusText = "Placed range cue at \(barBeatString(for: cue.time))"
+    }
+
+    func dropLibraryCue(templateID: String, laneID: String, xPosition: CGFloat, laneWidth: CGFloat) {
+        guard let template = libraryTemplates.first(where: { $0.id == templateID }) else { return }
+        let normalized = max(0, min(1, xPosition / max(1, laneWidth)))
+        placeOneShotCue(in: laneID, at: normalized, fromTemplate: template)
+    }
+
+    func cueTooltip(_ cue: TimelineCue) -> String {
+        let laneName = lanes.first(where: { $0.id == cue.laneID })?.name ?? cue.laneID
+        let values = cue.params
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ", ")
+        let base = "\(laneName) • \(cue.actionID) • \(barBeatString(for: cue.time))"
+        return values.isEmpty ? base : "\(base)\n\(values)"
     }
 
     func xPosition(for time: Double, width: CGFloat) -> CGFloat {
@@ -323,14 +514,41 @@ final class GlitchBoardState: NSObject, ObservableObject {
         lanes.first(where: { $0.id == laneID })?.name ?? "Unknown Lane"
     }
 
-    private func placeCue(in laneID: String, at normalizedPosition: CGFloat) {
+    private func placeOneShotCue(in laneID: String, at normalizedPosition: CGFloat, fromTemplate template: LibraryCueTemplate?) {
         let unclamped = Double(normalizedPosition) * audioDuration
         let snappedTime = snapToQuarterNote(unclamped)
-        let cue = TimelineCue(laneID: laneID, time: snappedTime)
+        let action = template?.actionID ?? availableActions(for: laneID).first?.id ?? Self.fallbackActions[0].id
+        let actionDef = actionDefinition(for: laneID, actionID: action) ?? Self.fallbackActions[0]
+        let defaultParams = Dictionary(uniqueKeysWithValues: actionDef.params.map { ($0.key, $0.defaultValue) })
+        var cueParams = defaultParams
+        if let template {
+            cueParams.merge(template.params) { _, new in new }
+        }
+        let laneTarget = lanes.first(where: { $0.id == laneID })?.target ?? ""
+        let cue = TimelineCue(
+            laneID: laneID,
+            time: snappedTime,
+            label: template?.name ?? "Cue",
+            muted: false,
+            deviceTarget: laneTarget,
+            actionID: action,
+            params: cueParams,
+            startParams: cueParams,
+            endParams: cueParams,
+            kind: .oneShot,
+            interpolation: .linear
+        )
         cues.append(cue)
         cues.sort { $0.time < $1.time }
         selectCue(cue.id)
         statusText = "Placed \(cue.label) at \(barBeatString(for: snappedTime))"
+    }
+
+    private func applyDefaultParams(forCueAt index: Int, using action: CueActionDefinition) {
+        let defaults = Dictionary(uniqueKeysWithValues: action.params.map { ($0.key, $0.defaultValue) })
+        cues[index].params = defaults
+        cues[index].startParams = defaults
+        cues[index].endParams = defaults
     }
 
     private func startPlayheadTimer() {
@@ -369,21 +587,21 @@ final class GlitchBoardState: NSObject, ObservableObject {
         guard endTime >= startTime else { return }
 
         for cue in cues where cue.time >= startTime && cue.time < endTime {
+            guard !cue.muted else { continue }
             guard !firedCueIDs.contains(cue.id) else { continue }
             guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { continue }
             firedCueIDs.insert(cue.id)
 
-            nexusClient.sendIntent(
-                targets: [lane.target],
-                action: "glitchboard.cue.trigger",
-                params: [
-                    "cue_id": cue.id.uuidString,
-                    "label": cue.label,
-                    "lane": lane.name,
-                    "bar_beat": barBeatString(for: cue.time),
-                ]
-            )
+            var payload: [String: Any] = cue.params
+            if cue.kind == .range {
+                payload["end_time_seconds"] = cue.endTime ?? cue.time
+                payload["interpolation"] = cue.interpolation.rawValue
+            }
+            payload["cue_id"] = cue.id.uuidString
+            payload["label"] = cue.label
+            payload["bar_beat"] = barBeatString(for: cue.time)
 
+            nexusClient.sendIntent(targets: [lane.target], action: cue.actionID, params: payload)
             statusText = "Fired \(cue.label) on \(lane.name)"
         }
     }
@@ -413,84 +631,134 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private func safeProjectFileName() -> String {
         let base = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
         if base.isEmpty {
-            return "glitchboard_project"
+            return "glitchboard_setlist"
         }
         return base.replacingOccurrences(of: "/", with: "-")
     }
 
-    private func saveProject(to url: URL) {
+    private func saveSetlist(to url: URL, isAutosave: Bool) {
         do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let project = makeProjectDocument()
-            let data = try encoder.encode(project)
+            let setlist = makeSetlistDocument()
+            let data = try encoder.encode(setlist)
             try data.write(to: url, options: .atomic)
+            if isAutosave {
+                return
+            }
             activeProjectName = url.lastPathComponent
-            statusText = "Saved project to \(url.lastPathComponent)"
+            statusText = "Saved setlist to \(url.lastPathComponent)"
         } catch {
             statusText = "Save failed: \(error.localizedDescription)"
         }
     }
 
-    private func loadProject(from url: URL) {
+    private func loadSetlist(from url: URL) {
         do {
             let data = try Data(contentsOf: url)
             let decoder = JSONDecoder()
-            let document = try decoder.decode(JBTProjectFile.self, from: data)
-            applyProjectDocument(document, sourceURL: url)
-            activeProjectName = url.lastPathComponent
-            statusText = "Loaded project \(url.lastPathComponent)"
+            if let setlist = try? decoder.decode(JBTSetlistFile.self, from: data), setlist.jbtType == "daw_setlist" {
+                applySetlist(setlist, sourceURL: url)
+                activeProjectName = url.lastPathComponent
+                statusText = "Loaded setlist \(url.lastPathComponent)"
+                return
+            }
+
+            if let legacy = try? decoder.decode(JBTProjectFile.self, from: data) {
+                applyLegacyProject(legacy, sourceURL: url)
+                activeProjectName = url.lastPathComponent
+                statusText = "Loaded legacy project \(url.lastPathComponent)"
+                return
+            }
+
+            statusText = "Load failed: unsupported .jbt format"
         } catch {
             statusText = "Load failed: \(error.localizedDescription)"
         }
     }
 
-    private func makeProjectDocument() -> JBTProjectFile {
-        let cuesForFile: [JBTProjectFile.Cue] = cues.compactMap { cue in
+    private func makeSetlistDocument() -> JBTSetlistFile {
+        let songID = "song_001"
+        let songTitle = selectedAudioFileName == "No audio loaded" ? "Untitled Song" : selectedAudioFileName
+        let songCues: [JBTSetlistFile.Cue] = cues.compactMap { cue in
             guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { return nil }
             let beatIndex = max(0, Int(round(cue.time / beatDuration)))
             let bar = (beatIndex / 4) + 1
             let beat = (beatIndex % 4) + 1
-            return JBTProjectFile.Cue(
+
+            var endBar: Int?
+            var endBeat: Int?
+            var endTimeSeconds: Double?
+            if let cueEnd = cue.endTime {
+                let endBeatIndex = max(0, Int(round(cueEnd / beatDuration)))
+                endBar = (endBeatIndex / 4) + 1
+                endBeat = (endBeatIndex % 4) + 1
+                endTimeSeconds = cueEnd
+            }
+
+            return JBTSetlistFile.Cue(
                 id: cue.id.uuidString,
-                type: "one_shot",
+                type: cue.kind.rawValue,
                 bar: bar,
                 beat: beat,
+                endBar: endBar,
+                endBeat: endBeat,
                 timeSeconds: cue.time,
+                endTimeSeconds: endTimeSeconds,
                 deviceID: lane.target,
-                action: "glitchboard.cue.trigger",
-                params: ["lane_id": lane.id],
-                muted: false,
+                action: cue.actionID,
+                params: cue.params,
+                startParams: cue.startParams,
+                endParams: cue.endParams,
+                muted: cue.muted,
                 label: cue.label,
-                color: lane.accentHex
+                color: lane.accentHex,
+                interpolation: cue.kind == .range ? cue.interpolation.rawValue : nil
             )
         }
 
-        let laneRows = lanes.map { lane in
-            JBTProjectFile.DeviceLane(
-                deviceID: lane.target,
-                label: lane.name,
-                color: lane.accentHex,
+        let song = JBTSetlistFile.Song(
+            id: songID,
+            title: songTitle,
+            audioPath: loadedAudioURL?.path,
+            bpm: bpm,
+            timeSignature: "4/4",
+            cues: songCues,
+            transition: JBTSetlistFile.Transition(type: "immediate", transitionCues: [])
+        )
+
+        let globalLibrary = libraryTemplates.map {
+            JBTSetlistFile.GlobalCue(
+                id: $0.id,
+                name: $0.name,
+                icon: $0.icon,
+                action: $0.actionID,
+                deviceType: "unknown",
+                params: $0.params,
+                tags: ["phase2", "library"]
+            )
+        }
+
+        let laneRows = lanes.map {
+            JBTSetlistFile.DeviceLane(
+                deviceID: $0.target,
+                label: $0.name,
+                color: $0.accentHex,
                 offlineBehavior: "skip",
                 queueTimeoutSeconds: 5
             )
         }
 
-        let songTitle = selectedAudioFileName == "No audio loaded"
-            ? "Untitled Song"
-            : selectedAudioFileName
-
-        let payload = JBTProjectFile.Payload(
-            title: songTitle,
-            audioPath: loadedAudioURL?.path,
-            bpm: bpm,
-            timeSignature: "4/4",
-            cues: cuesForFile,
-            deviceLanes: laneRows
+        let payload = JBTSetlistFile.Payload(
+            songs: [song],
+            globalCueLibrary: globalLibrary,
+            deviceLanes: laneRows,
+            midiMappings: []
         )
 
-        return JBTProjectFile(
-            jbtType: "daw_project",
+        return JBTSetlistFile(
+            jbtType: "daw_setlist",
             version: "1.0",
             createdAt: ISO8601DateFormatter().string(from: Date()),
             name: projectName,
@@ -498,13 +766,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
         )
     }
 
-    private func applyProjectDocument(_ document: JBTProjectFile, sourceURL: URL) {
+    private func applySetlist(_ setlist: JBTSetlistFile, sourceURL: URL) {
         stop()
-        projectName = document.name
-        bpm = document.payload.bpm
+        projectName = setlist.name
+        let song = setlist.payload.songs.first
+        bpm = song?.bpm ?? 140
         fitZoom()
 
-        lanes = document.payload.deviceLanes.map { lane in
+        lanes = setlist.payload.deviceLanes.map { lane in
             CueLane(
                 id: "lane.\(lane.deviceID)",
                 name: lane.label,
@@ -518,28 +787,99 @@ final class GlitchBoardState: NSObject, ObservableObject {
             lanes = Self.placeholderLanes
         }
 
-        if let audioPath = document.payload.audioPath,
+        if let song, let audioPath = song.audioPath,
            let resolvedURL = resolveAudioPath(audioPath, relativeTo: sourceURL.deletingLastPathComponent()),
-           FileManager.default.fileExists(atPath: resolvedURL.path)
+           resolvedURL.fileExists
         {
             loadAudio(from: resolvedURL)
         } else {
             clearAudioState()
         }
 
-        var restoredCues: [TimelineCue] = []
-        for row in document.payload.cues {
-            let cueLaneID = lanes.first(where: { $0.target == row.deviceID })?.id ?? lanes.first?.id ?? "lane.unknown"
+        var restored: [TimelineCue] = []
+        for row in song?.cues ?? [] {
+            let laneID = lanes.first(where: { $0.target == row.deviceID })?.id ?? lanes.first?.id ?? "lane.unknown"
             let cueTime = row.timeSeconds ?? timeFrom(bar: row.bar, beat: row.beat, beatDuration: beatDuration)
-            guard cueTime.isFinite else { continue }
+            let cueEnd = row.endTimeSeconds ?? {
+                guard let endBar = row.endBar, let endBeat = row.endBeat else { return nil }
+                return timeFrom(bar: endBar, beat: endBeat, beatDuration: beatDuration)
+            }()
             let uuid = UUID(uuidString: row.id) ?? UUID()
-            restoredCues.append(TimelineCue(id: uuid, laneID: cueLaneID, time: max(0, cueTime), label: row.label))
+            restored.append(
+                TimelineCue(
+                    id: uuid,
+                    laneID: laneID,
+                    time: max(0, cueTime),
+                    endTime: cueEnd,
+                    label: row.label,
+                    muted: row.muted,
+                    deviceTarget: row.deviceID,
+                    actionID: row.action,
+                    params: row.params,
+                    startParams: row.startParams,
+                    endParams: row.endParams,
+                    kind: CueKind(rawValue: row.type) ?? .oneShot,
+                    interpolation: CueInterpolation(rawValue: row.interpolation ?? "") ?? .linear
+                )
+            )
         }
-
-        cues = restoredCues.sorted { $0.time < $1.time }
+        cues = restored.sorted { $0.time < $1.time }
         firedCueIDs.removeAll()
         selectCue(nil)
         refreshLaneStatusesFromNexus()
+    }
+
+    private func applyLegacyProject(_ legacy: JBTProjectFile, sourceURL: URL) {
+        let song = JBTSetlistFile.Song(
+            id: "song_001",
+            title: legacy.payload.title,
+            audioPath: legacy.payload.audioPath,
+            bpm: legacy.payload.bpm,
+            timeSignature: legacy.payload.timeSignature,
+            cues: legacy.payload.cues.map {
+                JBTSetlistFile.Cue(
+                    id: $0.id,
+                    type: $0.type,
+                    bar: $0.bar,
+                    beat: $0.beat,
+                    endBar: nil,
+                    endBeat: nil,
+                    timeSeconds: $0.timeSeconds,
+                    endTimeSeconds: nil,
+                    deviceID: $0.deviceID,
+                    action: $0.action,
+                    params: $0.params.compactMapValues { Double($0) },
+                    startParams: [:],
+                    endParams: [:],
+                    muted: $0.muted,
+                    label: $0.label,
+                    color: $0.color,
+                    interpolation: nil
+                )
+            },
+            transition: JBTSetlistFile.Transition(type: "immediate", transitionCues: [])
+        )
+        let setlist = JBTSetlistFile(
+            jbtType: "daw_setlist",
+            version: "1.0",
+            createdAt: legacy.createdAt,
+            name: legacy.name,
+            payload: JBTSetlistFile.Payload(
+                songs: [song],
+                globalCueLibrary: [],
+                deviceLanes: legacy.payload.deviceLanes.map {
+                    JBTSetlistFile.DeviceLane(
+                        deviceID: $0.deviceID,
+                        label: $0.label,
+                        color: $0.color,
+                        offlineBehavior: $0.offlineBehavior,
+                        queueTimeoutSeconds: $0.queueTimeoutSeconds
+                    )
+                },
+                midiMappings: []
+            )
+        )
+        applySetlist(setlist, sourceURL: sourceURL)
     }
 
     private func timeFrom(bar: Int, beat: Int, beatDuration: Double) -> Double {
@@ -567,15 +907,23 @@ final class GlitchBoardState: NSObject, ObservableObject {
         return Array(Set(pieces + [lowered]))
     }
 
+    private func startAutosaveTimer() {
+        autosaveTimer?.invalidate()
+        autosaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.saveSetlist(to: self?.autosaveURL ?? URL(fileURLWithPath: "/tmp/autosave.jbt"), isAutosave: true)
+            }
+        }
+        if let autosaveTimer {
+            RunLoop.main.add(autosaveTimer, forMode: .common)
+        }
+    }
+
     private func wireNexusObservers() {
         nexusClient.$isConnected
             .combineLatest(nexusClient.$isConnecting, nexusClient.$connectedClients)
             .sink { [weak self] _, _, _ in
                 guard let self else { return }
-                if self.nexusClient.isConnected == false {
-                    self.requestedCapabilityTargets.removeAll()
-                    self.capabilitiesByClient.removeAll()
-                }
                 self.requestCapabilitiesIfNeeded()
                 self.refreshLaneStatusesFromNexus()
             }
@@ -584,12 +932,18 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     private func handleNexusMessage(_ message: NexusMessage) {
         guard message.type == "capabilities.result" else { return }
-        guard let target = message.payload["target"]?.anyValue as? String else { return }
+
+        let target = (message.payload["target_client_id"]?.anyValue as? String)
+            ?? (message.payload["target"]?.anyValue as? String)
+            ?? ""
+        guard !target.isEmpty else { return }
+
         let capabilities = message.payload["capabilities"]?.anyValue as? [String: Any] ?? [:]
         capabilitiesByClient[target] = capabilities
+        actionDefinitionsByClient[target] = parseActions(from: capabilities)
 
         if let index = lanes.firstIndex(where: { $0.target == target }),
-           let label = capabilities["label"] as? String,
+           let label = (capabilities["device_label"] as? String) ?? (capabilities["label"] as? String),
            !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             lanes[index].name = label
@@ -631,7 +985,6 @@ final class GlitchBoardState: NSObject, ObservableObject {
         guard !clients.isEmpty else { return }
 
         var updated = lanes
-
         for client in clients {
             let alreadyMatched = updated.contains(where: { laneMatchesClient(lane: $0, client: client) })
             if alreadyMatched {
@@ -648,7 +1001,6 @@ final class GlitchBoardState: NSObject, ObservableObject {
             )
             updated.append(discoveredLane)
         }
-
         lanes = updated
     }
 
@@ -716,6 +1068,75 @@ final class GlitchBoardState: NSObject, ObservableObject {
             .joined(separator: " ")
     }
 
+    private func parseActions(from capabilities: [String: Any]) -> [CueActionDefinition] {
+        var actions: [CueActionDefinition] = []
+
+        if let rawActions = capabilities["actions"] as? [[String: Any]] {
+            for raw in rawActions {
+                let actionID = (raw["id"] as? String) ?? (raw["action"] as? String) ?? (raw["name"] as? String) ?? "action"
+                let actionName = (raw["label"] as? String) ?? (raw["name"] as? String) ?? actionID
+                let params = parseParams(from: raw["params"])
+                actions.append(CueActionDefinition(id: actionID, name: actionName, params: params))
+            }
+        } else if let rawActionMap = capabilities["actions"] as? [String: Any] {
+            for (actionID, raw) in rawActionMap {
+                let rawObject = raw as? [String: Any]
+                let actionName = rawObject?["label"] as? String ?? actionID
+                let params = parseParams(from: rawObject?["params"])
+                actions.append(CueActionDefinition(id: actionID, name: actionName, params: params))
+            }
+        }
+
+        if actions.isEmpty, let intents = capabilities["intents"] as? [String] {
+            actions = intents.map { CueActionDefinition(id: $0, name: $0, params: []) }
+        }
+
+        if actions.isEmpty {
+            return Self.fallbackActions
+        }
+
+        return actions
+    }
+
+    private func parseParams(from rawParams: Any?) -> [CueParamDefinition] {
+        var params: [CueParamDefinition] = []
+
+        if let list = rawParams as? [[String: Any]] {
+            for row in list {
+                let key = (row["key"] as? String) ?? (row["name"] as? String) ?? "value"
+                let name = (row["label"] as? String) ?? key
+                let minValue = doubleValue(row["min"]) ?? 0
+                let maxValue = doubleValue(row["max"]) ?? 255
+                let defaultValue = doubleValue(row["default"]) ?? min(max(minValue, 127), maxValue)
+                params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
+            }
+            return params
+        }
+
+        if let map = rawParams as? [String: Any] {
+            for (key, rowRaw) in map {
+                let row = rowRaw as? [String: Any]
+                let name = row?["label"] as? String ?? key
+                let minValue = doubleValue(row?["min"]) ?? 0
+                let maxValue = doubleValue(row?["max"]) ?? 255
+                let defaultValue = doubleValue(row?["default"]) ?? min(max(minValue, 127), maxValue)
+                params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
+            }
+        }
+
+        return params.sorted { $0.key < $1.key }
+    }
+
+    private func doubleValue(_ value: Any?) -> Double? {
+        switch value {
+        case let v as Double: return v
+        case let v as Int: return Double(v)
+        case let v as NSNumber: return v.doubleValue
+        case let v as String: return Double(v)
+        default: return nil
+        }
+    }
+
     nonisolated private static func extractWaveform(url: URL, targetSampleCount: Int) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat
@@ -758,5 +1179,11 @@ final class GlitchBoardState: NSObject, ObservableObject {
         }
 
         return output
+    }
+}
+
+private extension URL {
+    var fileExists: Bool {
+        FileManager.default.fileExists(atPath: path)
     }
 }

@@ -129,7 +129,10 @@ public final class NexusClient: ObservableObject {
 
     public func requestCapabilities(of clientId: String) {
         Task {
-            try? await sendMessage(type: "capabilities.query", payload: ["target": clientId])
+            try? await sendMessage(type: "capabilities.query", payload: [
+                "target_client_id": clientId,
+                "target": clientId
+            ])
         }
     }
 

@@ -4,18 +4,29 @@ import UniformTypeIdentifiers
 
 struct GlitchBoardMainView: View {
     @ObservedObject var state: GlitchBoardState
-    @State private var isImporterPresented = false
+    @State private var isAudioImporterPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             controlStrip
-            timelinePanel
+
+            HStack(alignment: .top, spacing: 12) {
+                CueLibraryPanel(state: state)
+                    .frame(width: 220)
+
+                timelinePanel
+                    .frame(maxWidth: .infinity)
+
+                CueEditorPanel(state: state)
+                    .frame(width: 320)
+            }
+
             statusStrip
         }
         .padding(16)
         .background(GlitchBoardTheme.background.ignoresSafeArea())
         .tint(GlitchBoardTheme.accent)
-        .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.audio]) { result in
+        .fileImporter(isPresented: $isAudioImporterPresented, allowedContentTypes: [.audio]) { result in
             switch result {
             case let .success(url):
                 state.loadAudio(from: url)
@@ -25,6 +36,16 @@ struct GlitchBoardMainView: View {
         }
         .onDeleteCommand {
             state.deleteSelectedCue()
+        }
+        .alert("Recover Autosave?", isPresented: $state.showAutosaveRecoveryAlert) {
+            Button("Recover") {
+                state.recoverAutosave()
+            }
+            Button("Discard", role: .destructive) {
+                state.discardAutosave()
+            }
+        } message: {
+            Text("Found autosave at ~/JBT/glitchboard/autosave.jbt")
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -57,7 +78,7 @@ struct GlitchBoardMainView: View {
     private var controlStrip: some View {
         HStack(spacing: 10) {
             Button("Load Audio") {
-                isImporterPresented = true
+                isAudioImporterPresented = true
             }
             .buttonStyle(.borderedProminent)
 
@@ -132,11 +153,7 @@ struct GlitchBoardMainView: View {
                     WaveformView(state: state, contentWidth: state.timelineContentWidth)
 
                     ForEach(state.lanes) { lane in
-                        CueLaneRowView(
-                            state: state,
-                            lane: lane,
-                            contentWidth: state.timelineContentWidth
-                        )
+                        CueLaneRowView(state: state, lane: lane, contentWidth: state.timelineContentWidth)
                     }
                 }
                 .frame(width: state.timelineContentWidth, alignment: .leading)
@@ -227,6 +244,172 @@ struct GlitchBoardMainView: View {
     }
 }
 
+private struct CueLibraryPanel: View {
+    @ObservedObject var state: GlitchBoardState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Cue Library")
+                .font(.headline)
+            Text("Drag onto a lane")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(state.libraryTemplates) { cue in
+                HStack(spacing: 8) {
+                    Text(cue.icon)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(cue.name)
+                            .font(.system(.callout, design: .monospaced))
+                        Text(cue.actionID)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(8)
+                .background(GlitchBoardTheme.elevatedSurface)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .onDrag {
+                    NSItemProvider(object: cue.id as NSString)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(GlitchBoardTheme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(GlitchBoardTheme.accent.opacity(0.22), lineWidth: 1)
+        )
+    }
+}
+
+private struct CueEditorPanel: View {
+    @ObservedObject var state: GlitchBoardState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Cue Editor")
+                .font(.headline)
+
+            if let selectedCue = state.selectedCue {
+                cueEditorContent(selectedCue: selectedCue)
+            } else {
+                Text("Select a cue to edit")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(GlitchBoardTheme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(GlitchBoardTheme.accent.opacity(0.22), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func cueEditorContent(selectedCue: TimelineCue) -> some View {
+        let laneOptions = state.lanes
+        let actionOptions = state.availableActions(for: selectedCue.laneID)
+        let action = state.actionDefinition(for: selectedCue.laneID, actionID: selectedCue.actionID) ?? actionOptions.first
+
+        Picker("Device", selection: Binding(get: { selectedCue.laneID }, set: { state.updateSelectedCueLane($0) })) {
+            ForEach(laneOptions) { lane in
+                Text(lane.name).tag(lane.id)
+            }
+        }
+
+        Picker("Action", selection: Binding(get: { selectedCue.actionID }, set: { state.updateSelectedCueAction($0) })) {
+            ForEach(actionOptions) { action in
+                Text(action.name).tag(action.id)
+            }
+        }
+
+        Toggle("Muted", isOn: Binding(get: { selectedCue.muted }, set: { _ in state.toggleMute(selectedCue.id) }))
+
+        if let action {
+            Text("Params")
+                .font(.caption.weight(.semibold))
+                .padding(.top, 4)
+
+            ForEach(action.params) { param in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(param.name) [\(Int(param.minValue))...\(Int(param.maxValue))]")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    if selectedCue.kind == .range {
+                        HStack {
+                            Text("S")
+                                .font(.caption2)
+                            TextField(
+                                "",
+                                value: Binding(
+                                    get: { selectedCue.startParams[param.key] ?? param.defaultValue },
+                                    set: { state.updateSelectedRangeParam(key: param.key, startValue: $0, endValue: selectedCue.endParams[param.key] ?? param.defaultValue) }
+                                ),
+                                format: .number
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            Text("E")
+                                .font(.caption2)
+                            TextField(
+                                "",
+                                value: Binding(
+                                    get: { selectedCue.endParams[param.key] ?? param.defaultValue },
+                                    set: { state.updateSelectedRangeParam(key: param.key, startValue: selectedCue.startParams[param.key] ?? param.defaultValue, endValue: $0) }
+                                ),
+                                format: .number
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                    } else {
+                        TextField(
+                            "",
+                            value: Binding(
+                                get: { selectedCue.params[param.key] ?? param.defaultValue },
+                                set: { state.updateSelectedCueParam(key: param.key, value: $0) }
+                            ),
+                            format: .number
+                        )
+                        .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+        }
+
+        if selectedCue.kind == .range {
+            HStack {
+                Text("Interpolation")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("", selection: Binding(get: { selectedCue.interpolation }, set: { state.updateSelectedCueInterpolation($0) })) {
+                    Text("linear").tag(CueInterpolation.linear)
+                    Text("step").tag(CueInterpolation.step)
+                    Text("triangle").tag(CueInterpolation.triangle)
+                }
+                .labelsHidden()
+            }
+        }
+
+        HStack {
+            Button("Duplicate") {
+                state.duplicateCue(selectedCue.id)
+            }
+            Button("Delete", role: .destructive) {
+                state.deleteCue(selectedCue.id)
+            }
+        }
+    }
+}
+
 private struct TrackGridOverlayView: View {
     let duration: Double
     let beatDuration: Double
@@ -244,7 +427,6 @@ private struct TrackGridOverlayView: View {
                 var path = Path()
                 path.move(to: CGPoint(x: x, y: 0))
                 path.addLine(to: CGPoint(x: x, y: size.height))
-
                 context.stroke(
                     path,
                     with: .color(isBar ? GlitchBoardTheme.gridMajor : GlitchBoardTheme.gridMinor),
@@ -334,7 +516,6 @@ private struct WaveformView: View {
     var body: some View {
         ZStack {
             GlitchBoardTheme.elevatedSurface
-
             TrackGridOverlayView(
                 duration: state.audioDuration,
                 beatDuration: state.beatDuration,
@@ -414,19 +595,35 @@ private struct CueLaneRowView: View {
                     )
 
                     ForEach(state.cues(for: lane.id)) { cue in
-                        cueMarker(cue: cue, width: proxy.size.width)
+                        cueView(cue: cue, width: proxy.size.width)
                     }
                 }
+                .coordinateSpace(name: "laneCanvas")
                 .contentShape(Rectangle())
                 .onTapGesture(coordinateSpace: .local) { location in
-                    state.handleLaneTap(
+                    state.handleLaneTap(laneID: lane.id, xPosition: location.x, laneWidth: proxy.size.width)
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 12, coordinateSpace: .local)
+                        .onEnded { value in
+                            state.createRangeCue(
+                                in: lane.id,
+                                startX: value.startLocation.x,
+                                endX: value.location.x,
+                                laneWidth: proxy.size.width
+                            )
+                        }
+                )
+                .onDrop(
+                    of: [UTType.text.identifier],
+                    delegate: CueLibraryDropDelegate(
+                        state: state,
                         laneID: lane.id,
-                        xPosition: location.x,
                         laneWidth: proxy.size.width
                     )
-                }
+                )
             }
-            .frame(width: contentWidth, height: 96)
+            .frame(width: contentWidth, height: 106)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -436,28 +633,97 @@ private struct CueLaneRowView: View {
     }
 
     @ViewBuilder
-    private func cueMarker(cue: TimelineCue, width: CGFloat) -> some View {
-        let x = state.xPosition(for: cue.time, width: width)
-        let isSelected = cue.id == state.selectedCueID
+    private func cueView(cue: TimelineCue, width: CGFloat) -> some View {
+        if cue.kind == .range, let endTime = cue.endTime {
+            let x1 = state.xPosition(for: cue.time, width: width)
+            let x2 = state.xPosition(for: endTime, width: width)
+            let y: CGFloat = 34
 
-        VStack(spacing: 4) {
-            Circle()
-                .fill(laneAccentColor)
-                .frame(width: 10, height: 10)
-                .overlay(
-                    Circle()
-                        .stroke(Color.white.opacity(isSelected ? 0.95 : 0), lineWidth: 1.3)
+            ZStack {
+                Path { path in
+                    path.move(to: CGPoint(x: x1, y: y))
+                    path.addLine(to: CGPoint(x: x2, y: y))
+                }
+                .stroke(
+                    cue.muted ? Color.gray : laneAccentColor,
+                    style: StrokeStyle(lineWidth: 2.2, lineCap: .round)
                 )
-            Text(cue.label)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.9))
-                .padding(.horizontal, 4)
-                .background(Color.black.opacity(0.35))
-                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                .lineLimit(1)
+                .onTapGesture(count: 2) {
+                    state.cycleInterpolation(for: cue.id)
+                }
+                .onTapGesture {
+                    state.selectCue(cue.id)
+                }
+
+                Circle()
+                    .fill(cue.muted ? Color.gray : laneAccentColor)
+                    .frame(width: 10, height: 10)
+                    .position(x: x1, y: y)
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .named("laneCanvas"))
+                            .onChanged { value in
+                                state.updateCueBoundary(cueID: cue.id, isStart: true, xPosition: value.location.x, laneWidth: width)
+                            }
+                    )
+
+                Circle()
+                    .fill(cue.muted ? Color.gray : laneAccentColor)
+                    .frame(width: 10, height: 10)
+                    .position(x: x2, y: y)
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .named("laneCanvas"))
+                            .onChanged { value in
+                                state.updateCueBoundary(cueID: cue.id, isStart: false, xPosition: value.location.x, laneWidth: width)
+                            }
+                    )
+
+                Text(cue.label)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.horizontal, 4)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .position(x: (x1 + x2) / 2, y: y + 18)
+            }
+            .contextMenu {
+                Button("Edit") { state.selectCue(cue.id) }
+                Button(cue.muted ? "Unmute" : "Mute") { state.toggleMute(cue.id) }
+                Button("Duplicate") { state.duplicateCue(cue.id) }
+                Button("Delete", role: .destructive) { state.deleteCue(cue.id) }
+            }
+            .help(state.cueTooltip(cue))
+        } else {
+            let x = state.xPosition(for: cue.time, width: width)
+            let isSelected = cue.id == state.selectedCueID
+
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(cue.muted ? Color.gray : laneAccentColor)
+                    .frame(width: 10, height: 10)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(isSelected ? 0.95 : 0), lineWidth: 1.3)
+                    )
+                Text(cue.label)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding(.horizontal, 4)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .lineLimit(1)
+            }
+            .position(x: min(max(8, x), max(8, width - 8)), y: 30)
+            .onTapGesture {
+                state.selectCue(cue.id)
+            }
+            .contextMenu {
+                Button("Edit") { state.selectCue(cue.id) }
+                Button(cue.muted ? "Unmute" : "Mute") { state.toggleMute(cue.id) }
+                Button("Duplicate") { state.duplicateCue(cue.id) }
+                Button("Delete", role: .destructive) { state.deleteCue(cue.id) }
+            }
+            .help(state.cueTooltip(cue))
         }
-        .position(x: min(max(8, x), max(8, width - 8)), y: 30)
-        .help("\(cue.label) • \(state.barBeatString(for: cue.time))")
     }
 
     private var laneAccentColor: Color {
@@ -466,13 +732,39 @@ private struct CueLaneRowView: View {
 
     private var statusColor: Color {
         switch lane.status {
-        case .online:
-            return .green
-        case .offline:
-            return .red
-        case .connecting:
-            return .yellow
+        case .online: return .green
+        case .offline: return .red
+        case .connecting: return .yellow
         }
+    }
+}
+
+private struct CueLibraryDropDelegate: DropDelegate {
+    let state: GlitchBoardState
+    let laneID: String
+    let laneWidth: CGFloat
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let provider = info.itemProviders(for: [.text]).first else { return false }
+        let dropX = info.location.x
+        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { item, _ in
+            let templateID: String?
+            switch item {
+            case let value as Data:
+                templateID = String(data: value, encoding: .utf8)
+            case let value as String:
+                templateID = value
+            case let value as NSString:
+                templateID = value as String
+            default:
+                templateID = nil
+            }
+            guard let templateID else { return }
+            Task { @MainActor in
+                state.dropLibraryCue(templateID: templateID, laneID: laneID, xPosition: dropX, laneWidth: laneWidth)
+            }
+        }
+        return true
     }
 }
 
