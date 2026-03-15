@@ -295,60 +295,11 @@ class NexusHandlers:
             payload=message.payload.model_dump(),
         )
 
-        targets = [
-            record
-            for record in self.runtime.registry.online_records()
-            if record.websocket is not None and record.client_type != "monitor"
-        ]
-
-        futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        for target_record in targets:
-            per_client_id = f"{request_id}:{target_record.client_id}"
-            future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-            self.runtime.pending_scene_requests[per_client_id] = PendingRequest(
-                future=future,
-                requester_source=message.source,
-                target=target_record.client_id,
-            )
-            futures[target_record.client_id] = future
-
-            await self.runtime.send(
-                target_record.websocket,
-                make_message(
-                    "scene.collect",
-                    source="nexus",
-                    payload={"request_id": per_client_id, "requester": message.source},
-                ),
-            )
-
-        scene_bundle: dict[str, Any] = {}
-        for target_record in targets:
-            target_id = target_record.client_id
-            future = futures[target_id]
-            try:
-                payload = await asyncio.wait_for(future, timeout=2)
-                client_state = payload.get("state", {})
-            except asyncio.TimeoutError:
-                client_state = self.runtime.state_store.get_state(target_id)
-            finally:
-                self.runtime.pending_scene_requests.pop(f"{request_id}:{target_id}", None)
-
-            scene_bundle[target_id] = {
-                target_id: client_state,
-            }
-
-        if message.payload.include_offline:
-            for record in self.runtime.registry.all_records():
-                if record.client_id in scene_bundle:
-                    continue
-                scene_bundle[record.client_id] = self.runtime.state_store.get_state(record.client_id)
-
-        normalized_snapshot: dict[str, Any] = {}
-        for key, value in scene_bundle.items():
-            if isinstance(value, dict) and key in value:
-                normalized_snapshot[key] = value[key]
-            else:
-                normalized_snapshot[key] = value
+        normalized_snapshot = await self._collect_snapshot_from_clients(
+            requester_source=message.source,
+            request_id_prefix=request_id,
+            include_offline=message.payload.include_offline,
+        )
 
         await self.runtime.send(
             websocket,
@@ -370,6 +321,60 @@ class NexusHandlers:
             summary=f"Scene save completed ({len(normalized_snapshot)} clients)",
             payload={"request_id": request_id, "snapshot": normalized_snapshot},
         )
+
+    async def _collect_snapshot_from_clients(
+        self,
+        requester_source: str,
+        request_id_prefix: str,
+        include_offline: bool,
+    ) -> dict[str, Any]:
+        targets = [
+            record
+            for record in self.runtime.registry.online_records()
+            if record.websocket is not None and record.client_type != "monitor"
+        ]
+
+        futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        for target_record in targets:
+            per_client_id = f"{request_id_prefix}:{target_record.client_id}"
+            future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+            self.runtime.pending_scene_requests[per_client_id] = PendingRequest(
+                future=future,
+                requester_source=requester_source,
+                target=target_record.client_id,
+            )
+            futures[target_record.client_id] = future
+
+            await self.runtime.send(
+                target_record.websocket,
+                make_message(
+                    "scene.collect",
+                    source="nexus",
+                    payload={"request_id": per_client_id, "requester": requester_source},
+                ),
+            )
+
+        snapshot: dict[str, Any] = {}
+        for target_record in targets:
+            target_id = target_record.client_id
+            future = futures[target_id]
+            try:
+                payload = await asyncio.wait_for(future, timeout=2)
+                client_state = payload.get("state", {})
+            except asyncio.TimeoutError:
+                client_state = self.runtime.state_store.get_state(target_id)
+            finally:
+                self.runtime.pending_scene_requests.pop(f"{request_id_prefix}:{target_id}", None)
+
+            snapshot[target_id] = client_state if isinstance(client_state, dict) else {"value": client_state}
+
+        if include_offline:
+            for record in self.runtime.registry.all_records():
+                if record.client_type == "monitor" or record.client_id in snapshot:
+                    continue
+                snapshot[record.client_id] = self.runtime.state_store.get_state(record.client_id)
+
+        return snapshot
 
     async def _handle_scene_recall(self, websocket: WebSocketServerProtocol, message: SceneRecallMessage) -> None:
         snapshot = message.payload.snapshot
@@ -454,6 +459,32 @@ class NexusHandlers:
             session_id=message.payload.session_id,
             session_name=message.payload.session_name,
             source=message.source,
+        )
+
+        baseline_snapshot = await self._collect_snapshot_from_clients(
+            requester_source=message.source,
+            request_id_prefix=f"recstart_{uuid4().hex[:12]}",
+            include_offline=False,
+        )
+        captured_clients: list[str] = []
+        for client_id, client_state in baseline_snapshot.items():
+            if not isinstance(client_state, dict) or not client_state:
+                continue
+            captured_clients.append(client_id)
+            self.runtime.state_store.set_state(client_id, client_state)
+            self.runtime.record_event(
+                event_type="state_update",
+                source=client_id,
+                summary="Baseline state captured at recording start",
+                payload={"state": client_state, "baseline": True},
+            )
+
+        self.runtime.log_bus.log(
+            "info",
+            "Recording baseline captured",
+            session_id=message.payload.session_id,
+            clients=len(captured_clients),
+            client_ids=captured_clients,
         )
 
     async def _handle_recording_stop(self, websocket: WebSocketServerProtocol, message: RecordingStopMessage) -> None:
