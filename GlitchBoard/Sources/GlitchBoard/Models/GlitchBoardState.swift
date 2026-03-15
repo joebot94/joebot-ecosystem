@@ -30,12 +30,18 @@ final class GlitchBoardState: NSObject, ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var loadedAudioURL: URL?
     private var playheadTimer: Timer?
+    private var schedulerTimer: Timer?
     private var autosaveTimer: Timer?
-    private var firedCueIDs: Set<UUID> = []
+    private var scheduledCueIDs: Set<UUID> = []
+    private var scheduledRangeBuckets: Set<String> = []
     private var subscriptions: Set<AnyCancellable> = []
     private var requestedCapabilityTargets: Set<String> = []
     private var capabilitiesByClient: [String: [String: Any]] = [:]
     private var actionDefinitionsByClient: [String: [CueActionDefinition]] = [:]
+
+    private let schedulerInterval: TimeInterval = 0.05
+    private let schedulerLookAhead: TimeInterval = 0.20
+    private let rangeAutomationStep: TimeInterval = 0.05
 
     private static let placeholderLanes: [CueLane] = [
         CueLane(
@@ -283,7 +289,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             playheadTime = 0
             selectedAudioFileName = url.lastPathComponent
             selectCue(nil)
-            firedCueIDs.removeAll()
+            clearScheduledDispatchState()
             statusText = "Loaded \(selectedAudioFileName)"
             fitZoom()
 
@@ -308,13 +314,14 @@ final class GlitchBoardState: NSObject, ObservableObject {
         if playheadTime >= audioDuration - 0.001 {
             audioPlayer.currentTime = 0
             playheadTime = 0
-            firedCueIDs.removeAll()
+            clearScheduledDispatchState()
         }
 
         guard !audioPlayer.isPlaying else { return }
         audioPlayer.play()
         isPlaying = true
         startPlayheadTimer()
+        startSchedulerTimer()
         statusText = "Playing \(selectedAudioFileName)"
     }
 
@@ -323,6 +330,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
         audioPlayer.pause()
         isPlaying = false
         stopPlayheadTimer()
+        stopSchedulerTimer()
+        clearScheduledDispatchState()
         statusText = "Paused"
     }
 
@@ -333,8 +342,9 @@ final class GlitchBoardState: NSObject, ObservableObject {
         }
         isPlaying = false
         playheadTime = 0
-        firedCueIDs.removeAll()
         stopPlayheadTimer()
+        stopSchedulerTimer()
+        clearScheduledDispatchState()
         statusText = "Stopped"
     }
 
@@ -343,7 +353,11 @@ final class GlitchBoardState: NSObject, ObservableObject {
         if let selectedCueID, cues.contains(where: { $0.id == selectedCueID }) == false {
             selectCue(nil)
         }
-        firedCueIDs = firedCueIDs.intersection(Set(cues.map(\.id)))
+        let validCueIDs = Set(cues.map(\.id))
+        scheduledCueIDs = scheduledCueIDs.intersection(validCueIDs)
+        scheduledRangeBuckets = scheduledRangeBuckets.filter { bucket in
+            validCueIDs.contains { bucket.hasPrefix($0.uuidString) }
+        }
         statusText = "Cleared cues for \(laneName(for: laneID))"
     }
 
@@ -372,7 +386,8 @@ final class GlitchBoardState: NSObject, ObservableObject {
         let hadCue = cues.contains { $0.id == cueID }
         cues.removeAll { $0.id == cueID }
         if hadCue {
-            firedCueIDs.remove(cueID)
+            scheduledCueIDs.remove(cueID)
+            scheduledRangeBuckets = scheduledRangeBuckets.filter { !$0.hasPrefix(cueID.uuidString) }
             if selectedCueID == cueID {
                 selectCue(nil)
             }
@@ -569,40 +584,147 @@ final class GlitchBoardState: NSObject, ObservableObject {
         playheadTimer = nil
     }
 
+    private func startSchedulerTimer() {
+        stopSchedulerTimer()
+        schedulerTimer = Timer.scheduledTimer(withTimeInterval: schedulerInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.scheduleUpcomingCueDispatches()
+            }
+        }
+        if let schedulerTimer {
+            RunLoop.main.add(schedulerTimer, forMode: .common)
+        }
+    }
+
+    private func stopSchedulerTimer() {
+        schedulerTimer?.invalidate()
+        schedulerTimer = nil
+    }
+
+    private func clearScheduledDispatchState() {
+        scheduledCueIDs.removeAll()
+        scheduledRangeBuckets.removeAll()
+    }
+
+    private func scheduleUpcomingCueDispatches() {
+        guard let audioPlayer, audioPlayer.isPlaying else { return }
+        let now = audioPlayer.currentTime
+        let windowEnd = min(audioDuration, now + schedulerLookAhead)
+
+        for cue in cues where !cue.muted {
+            guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { continue }
+
+            switch cue.kind {
+            case .oneShot:
+                guard cue.time >= now, cue.time <= windowEnd else { continue }
+                guard !scheduledCueIDs.contains(cue.id) else { continue }
+                scheduledCueIDs.insert(cue.id)
+
+                let delay = max(0, cue.time - now)
+                let cueID = cue.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.dispatchOneShotCue(cueID: cueID)
+                    }
+                }
+
+            case .range:
+                guard let endTime = cue.endTime else { continue }
+                guard endTime >= now, cue.time <= windowEnd else { continue }
+
+                var sampleTime = max(now, cue.time)
+                while sampleTime <= min(endTime, windowEnd) + 0.0001 {
+                    let bucketIndex = Int((sampleTime / rangeAutomationStep).rounded())
+                    let bucketKey = "\(cue.id.uuidString)#\(bucketIndex)"
+                    guard !scheduledRangeBuckets.contains(bucketKey) else {
+                        sampleTime += rangeAutomationStep
+                        continue
+                    }
+
+                    scheduledRangeBuckets.insert(bucketKey)
+                    let dispatchDelay = max(0, sampleTime - now)
+                    let cueID = cue.id
+                    let laneTarget = lane.target
+                    let laneName = lane.name
+                    let dispatchTime = sampleTime
+                    DispatchQueue.main.asyncAfter(deadline: .now() + dispatchDelay) { [weak self] in
+                        Task { @MainActor [weak self] in
+                            self?.dispatchRangeStep(
+                                cueID: cueID,
+                                laneTarget: laneTarget,
+                                laneName: laneName,
+                                atTime: dispatchTime
+                            )
+                        }
+                    }
+
+                    sampleTime += rangeAutomationStep
+                }
+            }
+        }
+    }
+
+    private func dispatchOneShotCue(cueID: UUID) {
+        guard let cue = cues.first(where: { $0.id == cueID }) else { return }
+        guard !cue.muted else { return }
+        guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { return }
+
+        var payload: [String: Any] = cue.params
+        payload["cue_id"] = cue.id.uuidString
+        payload["label"] = cue.label
+        payload["bar_beat"] = barBeatString(for: cue.time)
+        payload["type"] = cue.kind.rawValue
+
+        nexusClient.sendIntent(targets: [lane.target], action: cue.actionID, params: payload)
+        statusText = "Fired \(cue.label) on \(lane.name)"
+    }
+
+    private func dispatchRangeStep(cueID: UUID, laneTarget: String, laneName: String, atTime playbackTime: Double) {
+        guard let cue = cues.first(where: { $0.id == cueID }) else { return }
+        guard cue.kind == .range, !cue.muted else { return }
+        guard let endTime = cue.endTime, endTime > cue.time else { return }
+        guard playbackTime >= cue.time, playbackTime <= endTime + 0.0001 else { return }
+
+        let progress = min(max((playbackTime - cue.time) / (endTime - cue.time), 0), 1)
+        let curveProgress: Double
+        switch cue.interpolation {
+        case .linear:
+            curveProgress = progress
+        case .step:
+            curveProgress = floor(progress * 8) / 8
+        case .triangle:
+            curveProgress = 1 - abs((progress * 2) - 1)
+        }
+
+        var payload: [String: Any] = [:]
+        let keys = Set(cue.startParams.keys).union(cue.endParams.keys).union(cue.params.keys)
+        for key in keys {
+            let startValue = cue.startParams[key] ?? cue.params[key] ?? 0
+            let endValue = cue.endParams[key] ?? cue.params[key] ?? startValue
+            payload[key] = startValue + (endValue - startValue) * curveProgress
+        }
+        payload["cue_id"] = cue.id.uuidString
+        payload["label"] = cue.label
+        payload["interpolation"] = cue.interpolation.rawValue
+        payload["progress"] = curveProgress
+        payload["type"] = cue.kind.rawValue
+        payload["bar_beat"] = barBeatString(for: playbackTime)
+
+        nexusClient.sendIntent(targets: [laneTarget], action: cue.actionID, params: payload)
+        statusText = "Automating \(cue.label) on \(laneName)"
+    }
+
     private func updatePlayhead() {
         guard let audioPlayer else { return }
-        let previous = playheadTime
         let current = min(audioDuration, audioPlayer.currentTime)
         playheadTime = current
-        fireCrossedCues(startTime: previous, endTime: current)
 
         if !audioPlayer.isPlaying, current >= audioDuration - 0.001 {
             isPlaying = false
             stopPlayheadTimer()
+            stopSchedulerTimer()
+            clearScheduledDispatchState()
             statusText = "Stopped"
-        }
-    }
-
-    private func fireCrossedCues(startTime: Double, endTime: Double) {
-        guard endTime >= startTime else { return }
-
-        for cue in cues where cue.time >= startTime && cue.time < endTime {
-            guard !cue.muted else { continue }
-            guard !firedCueIDs.contains(cue.id) else { continue }
-            guard let lane = lanes.first(where: { $0.id == cue.laneID }) else { continue }
-            firedCueIDs.insert(cue.id)
-
-            var payload: [String: Any] = cue.params
-            if cue.kind == .range {
-                payload["end_time_seconds"] = cue.endTime ?? cue.time
-                payload["interpolation"] = cue.interpolation.rawValue
-            }
-            payload["cue_id"] = cue.id.uuidString
-            payload["label"] = cue.label
-            payload["bar_beat"] = barBeatString(for: cue.time)
-
-            nexusClient.sendIntent(targets: [lane.target], action: cue.actionID, params: payload)
-            statusText = "Fired \(cue.label) on \(lane.name)"
         }
     }
 
@@ -659,6 +781,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             let data = try Data(contentsOf: url)
             let decoder = JSONDecoder()
             if let setlist = try? decoder.decode(JBTSetlistFile.self, from: data), setlist.jbtType == "daw_setlist" {
+                try validateSetlist(setlist)
                 applySetlist(setlist, sourceURL: url)
                 activeProjectName = url.lastPathComponent
                 statusText = "Loaded setlist \(url.lastPathComponent)"
@@ -675,6 +798,33 @@ final class GlitchBoardState: NSObject, ObservableObject {
             statusText = "Load failed: unsupported .jbt format"
         } catch {
             statusText = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func validateSetlist(_ setlist: JBTSetlistFile) throws {
+        guard setlist.jbtType == "daw_setlist" else {
+            throw NSError(domain: "GlitchBoard", code: 1001, userInfo: [NSLocalizedDescriptionKey: "Expected jbt_type=daw_setlist"])
+        }
+        guard !setlist.version.isEmpty else {
+            throw NSError(domain: "GlitchBoard", code: 1002, userInfo: [NSLocalizedDescriptionKey: "Missing version"])
+        }
+        guard !setlist.payload.songs.isEmpty else {
+            throw NSError(domain: "GlitchBoard", code: 1003, userInfo: [NSLocalizedDescriptionKey: "Setlist has no songs"])
+        }
+        let laneIDs = Set(setlist.payload.deviceLanes.map(\.deviceID))
+        for cue in setlist.payload.songs.flatMap(\.cues) {
+            guard !cue.id.isEmpty else {
+                throw NSError(domain: "GlitchBoard", code: 1004, userInfo: [NSLocalizedDescriptionKey: "Cue id is empty"])
+            }
+            guard !cue.deviceID.isEmpty else {
+                throw NSError(domain: "GlitchBoard", code: 1005, userInfo: [NSLocalizedDescriptionKey: "Cue device_id is empty"])
+            }
+            guard !cue.action.isEmpty else {
+                throw NSError(domain: "GlitchBoard", code: 1006, userInfo: [NSLocalizedDescriptionKey: "Cue action is empty"])
+            }
+            if !laneIDs.isEmpty, !laneIDs.contains(cue.deviceID) {
+                throw NSError(domain: "GlitchBoard", code: 1007, userInfo: [NSLocalizedDescriptionKey: "Cue references unknown device_id \(cue.deviceID)"])
+            }
         }
     }
 
@@ -824,7 +974,7 @@ final class GlitchBoardState: NSObject, ObservableObject {
             )
         }
         cues = restored.sorted { $0.time < $1.time }
-        firedCueIDs.removeAll()
+        clearScheduledDispatchState()
         selectCue(nil)
         refreshLaneStatusesFromNexus()
     }
@@ -1070,15 +1220,16 @@ final class GlitchBoardState: NSObject, ObservableObject {
 
     private func parseActions(from capabilities: [String: Any]) -> [CueActionDefinition] {
         var actions: [CueActionDefinition] = []
+        let root = (capabilities["capabilities"] as? [String: Any]) ?? capabilities
 
-        if let rawActions = capabilities["actions"] as? [[String: Any]] {
+        if let rawActions = root["actions"] as? [[String: Any]] {
             for raw in rawActions {
                 let actionID = (raw["id"] as? String) ?? (raw["action"] as? String) ?? (raw["name"] as? String) ?? "action"
                 let actionName = (raw["label"] as? String) ?? (raw["name"] as? String) ?? actionID
                 let params = parseParams(from: raw["params"])
                 actions.append(CueActionDefinition(id: actionID, name: actionName, params: params))
             }
-        } else if let rawActionMap = capabilities["actions"] as? [String: Any] {
+        } else if let rawActionMap = root["actions"] as? [String: Any] {
             for (actionID, raw) in rawActionMap {
                 let rawObject = raw as? [String: Any]
                 let actionName = rawObject?["label"] as? String ?? actionID
@@ -1087,8 +1238,17 @@ final class GlitchBoardState: NSObject, ObservableObject {
             }
         }
 
-        if actions.isEmpty, let intents = capabilities["intents"] as? [String] {
+        if actions.isEmpty, let intents = root["intents"] as? [String] {
             actions = intents.map { CueActionDefinition(id: $0, name: $0, params: []) }
+        }
+
+        if actions.isEmpty, let definitions = root["action_definitions"] as? [[String: Any]] {
+            for row in definitions {
+                let actionID = (row["id"] as? String) ?? (row["name"] as? String) ?? "action"
+                let actionName = (row["label"] as? String) ?? actionID
+                let params = parseParams(from: row["params"])
+                actions.append(CueActionDefinition(id: actionID, name: actionName, params: params))
+            }
         }
 
         if actions.isEmpty {
@@ -1105,9 +1265,10 @@ final class GlitchBoardState: NSObject, ObservableObject {
             for row in list {
                 let key = (row["key"] as? String) ?? (row["name"] as? String) ?? "value"
                 let name = (row["label"] as? String) ?? key
-                let minValue = doubleValue(row["min"]) ?? 0
-                let maxValue = doubleValue(row["max"]) ?? 255
-                let defaultValue = doubleValue(row["default"]) ?? min(max(minValue, 127), maxValue)
+                let typeHint = (row["type"] as? String)?.lowercased()
+                let minValue = doubleValue(row["min"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : 0)
+                let maxValue = doubleValue(row["max"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 1 : 255)
+                let defaultValue = doubleValue(row["default"]) ?? (typeHint == "bool" || typeHint == "boolean" ? 0 : min(max(minValue, 127), maxValue))
                 params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
             }
             return params
@@ -1117,9 +1278,19 @@ final class GlitchBoardState: NSObject, ObservableObject {
             for (key, rowRaw) in map {
                 let row = rowRaw as? [String: Any]
                 let name = row?["label"] as? String ?? key
+                let typeHint = (row?["type"] as? String)?.lowercased()
+                let optionCount = (row?["options"] as? [Any])?.count ?? 0
                 let minValue = doubleValue(row?["min"]) ?? 0
-                let maxValue = doubleValue(row?["max"]) ?? 255
-                let defaultValue = doubleValue(row?["default"]) ?? min(max(minValue, 127), maxValue)
+                let maxValue = doubleValue(row?["max"]) ?? {
+                    if typeHint == "bool" || typeHint == "boolean" {
+                        return 1.0
+                    }
+                    if optionCount > 0 {
+                        return Double(max(0, optionCount - 1))
+                    }
+                    return 255.0
+                }()
+                let defaultValue = doubleValue(row?["default"]) ?? min(max(minValue, 0), maxValue)
                 params.append(CueParamDefinition(id: key, key: key, name: name, minValue: minValue, maxValue: maxValue, defaultValue: defaultValue))
             }
         }
